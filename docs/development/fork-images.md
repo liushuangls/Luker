@@ -1,9 +1,8 @@
 # Maintaining and publishing this fork
 
-The `release` branch stays at upstream. Work is split into two branches:
+The `release` branch is not used for fork-specific changes. `self` is the fork's integration and image branch, and the fixed source for `ghcr.io/liushuangls/luker:latest`.
 
-- `codex/gemini-history-cache`: the Gemini cache feature submitted upstream in [Luker PR #33](https://github.com/funnycups/Luker/pull/33).
-- `self`: the fork's integration and image branch, containing the feature plus Docker publishing support. This is the fixed source for `ghcr.io/liushuangls/luker:latest`.
+The Gemini history cache feature ([Luker PR #33](https://github.com/funnycups/Luker/pull/33)) and iOS keyboard fix ([Luker PR #34](https://github.com/funnycups/Luker/pull/34)) are now merged upstream. `self` includes their upstream versions and follow-up fixes through merges of `upstream/release`. The application code matches upstream; the remaining fork customization is image publishing and this guide.
 
 The image branch adjusts the publishing gate and adds `latest` to fork builds in the existing workflow. It retains upstream's Dockerfile, native amd64/arm64 builders, manifest assembly and other image tags. Fork builds run only on `self`, on push or manual dispatch; other branches cannot publish through this workflow. New runs cancel older runs on the same branch to prevent an older build from replacing a newer `latest`. Builds use the current repository's GHCR namespace and its `GITHUB_TOKEN`; no personal registry token is needed. Upstream's `latest` policy remains limited to stable tag refs.
 
@@ -30,7 +29,7 @@ Publishing does not update an existing server. When choosing to deploy, change o
 
 ## Bring in upstream updates
 
-Keep the upstream PR branch focused. Integrate upstream changes into the image branch, review conflicts and rerun tests before publishing:
+Integrate upstream changes into `self`, review conflicts and run the affected tests before publishing. When upstream merges a fork feature, adopt the upstream implementation and its follow-up fixes during conflict resolution:
 
 ```sh
 git fetch upstream
@@ -39,4 +38,4 @@ git merge upstream/release
 git push origin self
 ```
 
-If the upstream remote is not configured, add `https://github.com/funnycups/Luker.git` as `upstream` first. After the cache feature is merged upstream, reconcile any equivalent changes and keep only the small publishing customization. No force-push of `release` is needed.
+If the upstream remote is not configured, add `https://github.com/funnycups/Luker.git` as `upstream` first. Keep the publishing customization when resolving workflow conflicts. No force-push of `release` is needed.
