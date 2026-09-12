@@ -3,22 +3,22 @@
 The `release` branch stays at upstream. Work is split into two branches:
 
 - `codex/gemini-history-cache`: the Gemini cache feature submitted upstream in [Luker PR #33](https://github.com/funnycups/Luker/pull/33).
-- `codex/gemini-cache-images`: the feature plus this fork's manual Docker publishing support. Build images from this branch while the upstream PR is under review.
+- `self`: the fork's integration and image branch, containing the feature plus Docker publishing support. This is the fixed source for `ghcr.io/liushuangls/luker:latest`.
 
-The image branch adjusts the publishing gate and adds `latest` to manual fork builds in the existing workflow. It retains upstream's Dockerfile, native amd64/arm64 builders, manifest assembly and other image tags. Ordinary pushes in a fork do not publish an image. Manual runs use the current repository's GHCR namespace and its `GITHUB_TOKEN`; no personal registry token is needed. Upstream's `latest` policy remains limited to stable tag refs.
+The image branch adjusts the publishing gate and adds `latest` to fork builds in the existing workflow. It retains upstream's Dockerfile, native amd64/arm64 builders, manifest assembly and other image tags. Fork builds run only on `self`, on push or manual dispatch; other branches cannot publish through this workflow. New runs cancel older runs on the same branch to prevent an older build from replacing a newer `latest`. Builds use the current repository's GHCR namespace and its `GITHUB_TOKEN`; no personal registry token is needed. Upstream's `latest` policy remains limited to stable tag refs.
 
 ## Publish an image
 
-Enable Actions in the fork's **Actions** tab if GitHub displays the first-run fork notice. Open **Create Docker Image (Release and Staging)**, click **Run workflow**, and select `codex/gemini-cache-images`.
+Enable Actions in the fork's **Actions** tab if GitHub displays the first-run fork notice. Push updates to `self` to publish automatically. To rebuild manually, open **Create Docker Image (Release and Staging)**, click **Run workflow**, and select `self`.
 
 The equivalent CLI command is:
 
 ```sh
-gh workflow run docker-publish.yml --repo liushuangls/Luker --ref codex/gemini-cache-images
-gh run list --repo liushuangls/Luker --workflow docker-publish.yml --branch codex/gemini-cache-images
+gh workflow run docker-publish.yml --repo liushuangls/Luker --ref self
+gh run list --repo liushuangls/Luker --workflow docker-publish.yml --branch self
 ```
 
-A successful manual fork run publishes `ghcr.io/liushuangls/luker:latest`, `:manual`, `:dev`, and a `:sha-<commit>` tag containing both `linux/amd64` and `linux/arm64`. Use `latest` for deployment:
+A successful fork build from `self` publishes `ghcr.io/liushuangls/luker:latest`, `:dev`, and a `:sha-<commit>` tag containing both `linux/amd64` and `linux/arm64`. Manual runs also publish `:manual`. Use `latest` for deployment:
 
 ```yaml
 image: ghcr.io/liushuangls/luker:latest
@@ -34,9 +34,9 @@ Keep the upstream PR branch focused. Integrate upstream changes into the image b
 
 ```sh
 git fetch upstream
-git switch codex/gemini-cache-images
+git switch self
 git merge upstream/release
-git push origin codex/gemini-cache-images
+git push origin self
 ```
 
 If the upstream remote is not configured, add `https://github.com/funnycups/Luker.git` as `upstream` first. After the cache feature is merged upstream, reconcile any equivalent changes and keep only the small publishing customization. No force-push of `release` is needed.
