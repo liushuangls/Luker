@@ -289,6 +289,39 @@ body 裡：
 {{/each}}
 ```
 
+### 單鍵讀寫 —— <code v-pre>{{getvarkey}}</code> / <code v-pre>{{setvarkey}}</code>
+
+::: tip 實作來源說明
+本節的按鍵尋址巨集族來自 SillyTavern 原版；[點號路徑](#結構化值的點號路徑)則是 Luker 的擴充，單一巨集即可存取任意深度。為相容面向原版 SillyTavern 編寫的內容，兩種寫法皆可使用。
+:::
+
+SillyTavern 的按鍵尋址巨集族可以直接使用：
+
+| 巨集 | 別名 | 作用域 |
+|---|---|---|
+| <code v-pre>{{getvarkey::name::key}}</code> | `getvarindex` | 區域 |
+| <code v-pre>{{setvarkey::name::key::value}}</code> | `setvarindex` | 區域 |
+| <code v-pre>{{getglobalvarkey::name::key}}</code> | `getglobalvarindex` | 全域 |
+| <code v-pre>{{setglobalvarkey::name::key::value}}</code> | `setglobalvarindex` | 全域 |
+
+它們讀寫 JSON 字串化變數裡的**單個**鍵（或陣列索引）。鍵看起來是數字時會建成陣列，否則建成物件：
+
+```text
+{{setvarkey::roster::alice::40}}[{{getvarkey::roster::alice}}]  → [40]
+{{setvarkey::log::0::first}}{{setvarkey::log::1::second}}        → 鍵是數字，所以 `log` 是陣列
+[{{getvarkey::log::1}}]                                          → [second]
+```
+
+新寫的內容建議優先使用上面的[點號路徑](#結構化值的點號路徑)：一個巨集就能抵達任意深度，寫入也用同一套語法。`varkey` 只能處理一層，要寫到 `roster.alice.hp` 得自己拼「讀—改—寫」。
+
+它有一件點號路徑做不到的事：鍵會被**原樣**取用，所以當鍵本身含點號時只能用它。
+
+```text
+{{setvarkey::metrics::p95.latency::120}}   → 設定字面鍵 "p95.latency"
+{{getvarkey::metrics::p95.latency}}        → 120
+{{getvar::metrics.p95.latency}}            → 空：點號形式會在每個點處切分
+```
+
 ### 逐樓層變數 {#per-message-variables}
 
 原生 SillyTavern 裡，副作用巨集 <code v-pre>{{setvar::hp::50}}</code> 只在 *prompt 範本* 裡（預設、世界書、首樓）才會執行。AI 在回覆裡寫同樣的字面量什麼都不會發生，還會原樣顯示出來污染敘事。
@@ -500,28 +533,33 @@ Luker 用**逐樓層變數提取**解決這個問題。一條訊息（AI 回覆�
 | `!` | 比同段文字裡的其他巨集先解析 | 僅解析 |
 | `?` | 比其他巨集後解析 | 僅解析 |
 | `~` | 標記為可重新求值 | 僅解析 |
-| `>` | 把 `\|` 當輸出過濾器的管道 | 僅解析（見下文 *管道符*）|
+| `>` | 把 `\|` 當輸出過濾器的管道 | 無效果（見下文 *管道符*）|
 
 這些 token 解析器能識別，但執行時沒有任何 hook 消費它們。<code v-pre>{{if !.dead}}</code> 裡的 `!` 是另一回事——那是 <code v-pre>{{if}}</code> 內部的條件取反，不是這裡的旗標。
 
 旗標之間、旗標和巨集名之間都允許空白，多個可以組合：<code v-pre>{{ #each ::list}} … {{/each}}</code>。
 
-### `|` — 管道符（參數終止符）
+### `|` — 管道符（普通字元）
 
-管道符 `\|` 在巨集參數裡有特殊語義，**即使沒加 `>` 旗標也一樣**。lexer 看到 `\|` 就會從「參數」模式切走，所以：
+::: tip 與 SillyTavern 行為差異的由來
+原版 SillyTavern 將管道符解析為參數終止符，並支援 <code v-pre>{{macro|uppercase}}</code> 一類輸出修飾器。該實現在上游被暫時停用（issue #5618），Luker 遵循上游的詞法分析器，因此本節描述的行為與上游保持一致。
+:::
 
-```text
-{{getvar::name|filter}}
-```
-
-…會被解析為 `getvar` 巨集 + 單個參數 `name` + 一個名為 `filter` 的「過濾器」識別字。過濾器執行鏈沒接上，所以 `filter` 這個名字會被丟掉，整個巨集的行為等價於 <code v-pre>{{getvar::name}}</code>。直接後果是：**參數裡出現字面 `\|` 會把那個參數截斷**——想要在參數裡保留字面管道符，跳脫成 `\|`：
+管道符在巨集參數裡沒有特殊含義。lexer 不把 `|` 當參數終止符，所以它是普通內容，會原樣傳給巨集：
 
 ```text
-{{setvar::menu::sword \| shield \| bow}}
+{{setvar::menu::sword | shield | bow}}   → 存入 "sword | shield | bow"
+{{getvar::name|filter}}                  → 讀取名為 `name|filter` 的變數
 ```
 
-::: warning 管道符是預留語法
-今天寫 <code v-pre>{{macro\|uppercase}}</code> 並**不會**把內容轉大寫——只是不報錯地解析掉、丟掉過濾器名、把管道符前面的參數交給巨集。要做字串變換，寫一個註冊巨集，或者用 regex 擴充。完整的管道過濾鏈留給將來的引擎版本。
+管道符沒有跳脫寫法；反斜線會被原樣存入：
+
+```text
+{{setvar::k::a \| b}}   → 存入 "a \| b"
+```
+
+::: warning 輸出修飾器不可用
+<code v-pre>{{macro|uppercase}}</code> 不會把任何內容轉大寫。需要字串變換的話，請註冊自訂巨集，或使用 regex 擴充。
 :::
 
 ## 斜線指令裡的管道巨集 —— <code v-pre>{{pipe}}</code>、<code v-pre>{{var::name}}</code>
@@ -535,7 +573,7 @@ Luker 用**逐樓層變數提取**解決這個問題。一條訊息（AI 回覆�
 
 這兩個只在斜線指令解析器裡存在。不在 STscript 脈絡裡出現時，它們會原樣輸出。
 
-STscript 裡的 `\|` 是指令管道符，那是指令解析器的特性，不是巨集引擎的。在單個巨集的參數內部，`\|` 按上面*管道符*那一節的規則處理。
+STscript 裡的 `|` 是指令管道符，那是指令解析器的特性，不是巨集引擎的。在單個巨集的參數內部，`|` 按上面*管道符*那一節的規則處理。
 
 ## 解析語義
 

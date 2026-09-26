@@ -337,6 +337,7 @@ import { applyPatch as applyJsonPatch, compare as compareJsonPatch } from './scr
 import { shouldUseSettingsPatch } from './scripts/util/settings-patch-threshold.js';
 import { AudioPlayer } from './scripts/audio-player.js';
 import { MacroEnvBuilder } from './scripts/macros/engine/MacroEnvBuilder.js';
+import { MessageFormatter } from './scripts/message-formatter.js';
 import { MacroEngine } from './scripts/macros/engine/MacroEngine.js';
 import { addChatBackupsBrowser } from './scripts/chat-backups.js';
 import { onboardingExperimentalMacroEngine } from './scripts/macros/engine/MacroDiagnostics.js';
@@ -486,6 +487,7 @@ let lukerRecoveryJobId = '';
 let lukerRecoveryChatId = '';
 let lukerRecoveryEventSource = null;
 let lukerRecoveryLastSeq = 0;
+let lukerRecoveryFinalizeBusy = false;
 const LUKER_RECOVERY_PREVIEW_ID = 'luker_generation_recovery_preview';
 const LUKER_SERVER_PERSISTENCE_APIS = new Set(['openai', 'textgenerationwebui', 'kobold', 'novel']);
 let lastLukerGenerationId = '';
@@ -666,6 +668,75 @@ function removeLukerRecoveryPreview() {
     chatElement.find(`#${LUKER_RECOVERY_PREVIEW_ID}`).remove();
 }
 
+/**
+ * Complete a server-side generation recovered through the SSE/poll preview
+ * flow. Mirrors the normal generation-finish contract (onFinishStreaming /
+ * the takeover commit path) so extensions see a recovered reply exactly like
+ * a locally-received one:
+ *
+ *   1. reloadCurrentChat() re-reads the server-persisted message into chat[].
+ *   2. extractMessageById runs the side-effect-macro scan on the recovered
+ *      reply (the server persisted the raw text; without this, {{setvar}}
+ *      etc. in a recovered reply never fire and the var-ops panel never
+ *      shows the op).
+ *   3. The mutation is persisted BEFORE any event fires (6c99b32d0
+ *      persist-before-emit contract — extension listeners that react by
+ *      saving the chat must not race us into a double write).
+ *   4. GENERATION_ENDED → MESSAGE_RECEIVED → CHARACTER_MESSAGE_RENDERED
+ *      fire in that order (2edca162d ordering contract) with the recovered
+ *      message id and generation type 'normal', so memory-graph extraction,
+ *      vectors indexing, TTS teardown, token display, and reasoning parse
+ *      all see the message.
+ *
+ * Skipped when another generation is running (the recovery was torn down by
+ * GENERATION_STARTED; a live Generate owns the events), when the chat
+ * changed since recovery started, or when the terminal payload carried no
+ * text (failed/cancelled jobs have nothing to announce — the reload still
+ * happens so any partial server-persisted state becomes visible).
+ *
+ * @param {string} finalText Terminal job text (may be empty on failure)
+ */
+async function finalizeLukerRecoveredGeneration(finalText = '') {
+    if (lukerRecoveryFinalizeBusy) {
+        return;
+    }
+    lukerRecoveryFinalizeBusy = true;
+    try {
+        const finalizingChatId = lukerRecoveryChatId;
+        const wasBusyAnnounced = is_send_press;
+        stopLukerGenerationRecovery();
+        await reloadCurrentChat();
+
+        if (!finalText || wasBusyAnnounced || isGenerating() || !selected_group && this_chid === undefined) {
+            return;
+        }
+        if (finalizingChatId !== getCurrentChatId()) {
+            return;
+        }
+
+        const messageId = chat.length - 1;
+        const message = chat[messageId];
+        if (!message || message.is_user) {
+            return;
+        }
+
+        extractMessageById(messageId);
+        redrawMessageBubble(messageId);
+        await saveChatConditional();
+
+        await eventSource.emit(event_types.GENERATION_ENDED, chat.length);
+        await eventSource.emit(event_types.MESSAGE_RECEIVED, messageId, 'normal');
+        await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, messageId, 'normal');
+
+        playMessageSound();
+        notifyMessageComplete(String(message.mes || ''), String(message.name || ''));
+    } catch (error) {
+        console.warn('[LukerGeneration] Failed to finalize recovered generation', error);
+    } finally {
+        lukerRecoveryFinalizeBusy = false;
+    }
+}
+
 function stopLukerGenerationRecovery() {
     if (lukerRecoveryPollTimer) {
         clearInterval(lukerRecoveryPollTimer);
@@ -809,8 +880,7 @@ function startLukerRecoverySseStream(chatIdSnapshot) {
         if (payload?.status === 'failed') {
             stopLukerGenerationRecovery();
         } else if (payload?.status === 'completed') {
-            stopLukerGenerationRecovery();
-            void reloadCurrentChat();
+            void finalizeLukerRecoveredGeneration(liveText);
         }
     };
 
@@ -833,8 +903,13 @@ function startLukerRecoverySseStream(chatIdSnapshot) {
         // polling if the connection truly closed (readyState === CLOSED).
         if (source.readyState === EventSource.CLOSED) {
             lukerRecoveryEventSource = null;
-            // Job may have completed and the server closed the stream cleanly —
-            // refresh chat to pick up the persisted message either way.
+            // CLOSED without a terminal status frame means reconnects failed
+            // fatally — we can't distinguish "job completed, final status
+            // frame lost" from "connection died mid-job", so do NOT fire the
+            // completion event chain here (a still-running job would get
+            // phantom events). A terminal status, when it exists, is always
+            // re-delivered on the next successful reconnect via handleStatus;
+            // here just refresh the chat so any persisted state shows up.
             const stillHere = lukerRecoveryChatId === getCurrentChatId();
             stopLukerGenerationRecovery();
             if (stillHere) void reloadCurrentChat();
@@ -876,8 +951,7 @@ function startLukerRecoveryPollFallback(chatIdSnapshot) {
             }
 
             if (statusData?.status === 'completed') {
-                stopLukerGenerationRecovery();
-                await reloadCurrentChat();
+                await finalizeLukerRecoveredGeneration(String(statusData?.text || ''));
             }
         } catch (error) {
             console.warn('Failed to poll recovered generation status', error);
@@ -914,7 +988,7 @@ export const system_avatar = 'img/logo.png';
 export const comment_avatar = 'img/quill.png';
 export const default_user_avatar = 'img/user-default.png';
 export let CLIENT_VERSION = 'Luker:UNKNOWN:Cohee#1207'; // For Horde header
-export let EXTENSIONS_CLIENT_VERSION = 'Luker:1.18.0:Cohee#1207';
+export let EXTENSIONS_CLIENT_VERSION = 'Luker:1.19.0:Cohee#1207';
 let optionsPopper = Popper.createPopper(document.getElementById('options_button'), document.getElementById('options'), {
     placement: 'top-start',
 });
@@ -1381,7 +1455,7 @@ async function getClientVersion() {
             displayVersion += ` '${data.gitBranch}' (${data.gitRevision})`;
         }
 
-        const stCompatVersion = data.stCompatVersion || '1.18.0';
+        const stCompatVersion = data.stCompatVersion || '1.19.0';
         $('#version_display').text(`${displayVersion} · SillyTavern ${stCompatVersion}`);
         $('#version_display_welcome').text(displayVersion);
 
@@ -1779,6 +1853,7 @@ let activeWorldInfoPromptSnapshot = {
 };
 
 let this_del_mes = -1;
+let deleteToolCallsInDeleteMode = true;
 
 /** @type {string} */
 let this_edit_mes_chname = '';
@@ -3637,12 +3712,147 @@ async function maybeDeleteCharacterBoundImportedLorebook(character, { alreadyPro
 }
 
 /**
+ * Whether a chat message's text is empty after trimming. Used at prompt-build
+ * time to detect turns a user hid by blanking the text (regex script on the
+ * prompt lane, manual edit), which must cascade to the turn's tool records.
+ * @param {any} mes Message text
+ * @returns {boolean}
+ */
+function isBlankMessageText(mes) {
+    return typeof mes !== 'string' || mes.trim().length === 0;
+}
+
+/**
+ * Whether a chat message carries a reasoning payload. Reasoning tool rounds
+ * legitimately produce an empty-text assistant turn; their invocations must
+ * not be dropped by the blank-owner rule.
+ * @param {ChatMessage} message Chat message
+ * @returns {boolean}
+ */
+function hasMessageReasoning(message) {
+    if (typeof message?.extra?.reasoning === 'string' && message.extra.reasoning.trim().length > 0) {
+        return true;
+    }
+    if (Array.isArray(message?.extra?.reasoning_blocks) && message.extra.reasoning_blocks.length > 0) {
+        return true;
+    }
+    if (Array.isArray(message?.extra?.reasoning_details) && message.extra.reasoning_details.length > 0) {
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Whether a chat message is hidden from the prompt: /hide sets is_system
+ * on a message that is otherwise a normal turn, and the ignore symbol
+ * marks a message for complete exclusion.
+ * @param {ChatMessage} message Chat message
+ * @returns {boolean}
+ */
+function isHiddenChatMessage(message) {
+    return !message || message.is_system === true || message?.extra?.[IGNORE_SYMBOL] === true;
+}
+
+/**
+ * Resolve, for every tool invocation summary that survived into coreChat,
+ * the assistant turn that owns it. The summary is stored right after its
+ * owner's final reply; the owner is the nearest preceding assistant
+ * message, skipping other invocation summaries. When no assistant turn
+ * precedes the summary within the chat, the owner is the final reply that
+ * follows it (a pure tool round — no text, no reasoning — deletes its
+ * empty assistant message before the summary is saved, so the summary
+ * sits directly after the user turn and its result feeds the reply
+ * generated afterwards). An owner that cannot be resolved at all (the
+ * recursive generation mid-round, where the summary is the last message)
+ * is reported as missing — those summaries must survive so the tool
+ * results can reach the model that has yet to produce the final reply.
+ * @param {ChatMessage[]} rawChat Unfiltered chat snapshot
+ * @param {ChatMessage[]} coreChat Post-filter chat snapshot
+ * @returns {Map<number, {hidden: boolean, ownerCoreIndex: number}>} Per-summary (keyed by coreChat index)
+ * whether the owner turn is hidden, and the owner's coreChat index (-1 when absent).
+ */
+function resolveToolInvocationOwners(rawChat, coreChat) {
+    const isInvocationSummary = (message) => message?.extra?.isSmallSys === true
+        && Array.isArray(message.extra.tool_invocations)
+        && message.extra.tool_invocations.length > 0;
+
+    // coreChat is a filtered subset of rawChat with order preserved, and the
+    // regex map step (which replaces every entry with a spread copy) runs
+    // AFTER this pass — so identify entries by raw index, not by object
+    // identity, and report indexes the merge step can look up post-map.
+    const coreIndexOfRawIndex = new Map();
+    const summaryCoreIndexes = [];
+    for (let coreIndex = 0; coreIndex < coreChat.length; coreIndex++) {
+        const rawIndex = rawChat.indexOf(coreChat[coreIndex]);
+        if (rawIndex === -1) {
+            continue;
+        }
+        coreIndexOfRawIndex.set(rawIndex, coreIndex);
+        if (isInvocationSummary(coreChat[coreIndex])) {
+            summaryCoreIndexes.push([coreIndex, rawIndex]);
+        }
+    }
+
+    const summaryOwners = new Map();
+    for (const [coreIndex, rawIndex] of summaryCoreIndexes) {
+        // Nearest preceding assistant turn, skipping other summaries.
+        let ownerRawIndex = -1;
+        for (let i = rawIndex - 1; i >= 0; i--) {
+            const candidate = rawChat[i];
+            if (isInvocationSummary(candidate)) {
+                continue;
+            }
+            if (!candidate?.is_user) {
+                ownerRawIndex = i;
+            }
+            break;
+        }
+        // Pure tool round: owner is the final reply generated after the results.
+        if (ownerRawIndex === -1) {
+            for (let i = rawIndex + 1; i < rawChat.length; i++) {
+                const candidate = rawChat[i];
+                if (isInvocationSummary(candidate) || candidate?.is_user) {
+                    continue;
+                }
+                ownerRawIndex = i;
+                break;
+            }
+        }
+
+        summaryOwners.set(coreIndex, {
+            hidden: ownerRawIndex !== -1 && isHiddenChatMessage(rawChat[ownerRawIndex]),
+            ownerCoreIndex: ownerRawIndex === -1 ? -1 : (coreIndexOfRawIndex.get(ownerRawIndex) ?? -1),
+        });
+    }
+    return summaryOwners;
+}
+
+function getMessageDeletionStartId(id, deleteToolCalls = true) {
+    const message = chat[id];
+    if (!deleteToolCalls || message?.is_user || message?.is_system) {
+        return id;
+    }
+
+    let startId = id;
+    while (startId > 0) {
+        const previousMessage = chat[startId - 1];
+        if (!previousMessage?.is_system || !Array.isArray(previousMessage.extra?.tool_invocations)) {
+            break;
+        }
+        startId--;
+    }
+
+    return startId;
+}
+
+/**
  * Deletes a message from the chat by its ID, optionally asking for confirmation.
  * @param {number} id The ID of the message to delete.
  * @param {number} [swipeDeletionIndex] Deletes the swipe with that index.
  * @param {boolean} [askConfirmation=false] Whether to ask for confirmation before deleting.
+ * @param {boolean} [deleteToolCalls=true] Whether to delete preceding tool-call messages.
  */
-export async function deleteMessage(id, swipeDeletionIndex = undefined, askConfirmation = false) {
+export async function deleteMessage(id, swipeDeletionIndex = undefined, askConfirmation = false, deleteToolCalls = true) {
     const canDeleteSwipe = swipeDeletionIndex !== undefined && swipeDeletionIndex !== null;
     if (canDeleteSwipe) {
         if (swipeDeletionIndex < 0) {
@@ -3680,23 +3890,34 @@ export async function deleteMessage(id, swipeDeletionIndex = undefined, askConfi
         return;
     }
 
-    const deletedMessage = chat[id];
-    const deletedPlayableSeq = deletedMessage && !deletedMessage.is_system
-        ? chat.slice(0, id + 1).reduce((count, message) => count + (message && !message.is_system ? 1 : 0), 0)
-        : null;
-    const deletedAssistantSeq = deletedMessage && !deletedMessage.is_system && !deletedMessage.is_user
-        ? chat.slice(0, id + 1).reduce((count, message) => count + (message && !message.is_system && !message.is_user ? 1 : 0), 0)
-        : null;
+    const firstMessageId = getMessageDeletionStartId(id, deleteToolCalls);
+    const messageIds = Array.from({ length: id - firstMessageId + 1 }, (_, index) => id - index);
 
-    chat.splice(id, 1);
-    messageElement.remove();
+    const deletedPlayablePrefix = chat
+        .slice(0, firstMessageId)
+        .reduce((count, message) => count + (message && !message.is_system ? 1 : 0), 0);
+    const deletedPlayableCount = chat
+        .slice(firstMessageId, id + 1)
+        .reduce((count, message) => count + (message && !message.is_system ? 1 : 0), 0);
+    const deletedAssistantPrefix = chat
+        .slice(0, firstMessageId)
+        .reduce((count, message) => count + (message && !message.is_system && !message.is_user ? 1 : 0), 0);
+    const deletedAssistantCount = chat
+        .slice(firstMessageId, id + 1)
+        .reduce((count, message) => count + (message && !message.is_system && !message.is_user ? 1 : 0), 0);
+
+    // Delete from the end so earlier indices remain stable.
+    for (const messageId of messageIds) {
+        chat.splice(messageId, 1);
+        chatElement.find(`.mes[mesid="${messageId}"]`).remove();
+        deleteItemizedPromptForMessage(messageId);
+    }
 
     chat_metadata.tainted = true;
 
-    const startIndex = [0, minId].includes(id) ? id : null;
-    deleteItemizedPromptForMessage(id);
+    const startIndex = firstMessageId <= minId ? firstMessageId : null;
     updateViewMessageIds(startIndex);
-    const patched = await patchChatMessages([{ op: 'remove', path: `/${id}` }]);
+    const patched = await patchChatMessages(messageIds.map(messageId => ({ op: 'remove', path: `/${messageId}` })));
     if (!patched) {
         // Delete already mutated chat[] synchronously above; if the patch fetch
         // failed, the snapshot was invalidated and chat[] now disagrees with BE.
@@ -3715,10 +3936,10 @@ export async function deleteMessage(id, swipeDeletionIndex = undefined, askConfi
     await settleMessageDeleted(chat.length);
     await eventSource.emit(event_types.MESSAGE_DELETED, chat.length, {
         kind: 'delete',
-        deletedPlayableSeqFrom: deletedPlayableSeq,
-        deletedPlayableSeqTo: deletedPlayableSeq,
-        deletedAssistantSeqFrom: deletedAssistantSeq,
-        deletedAssistantSeqTo: deletedAssistantSeq,
+        deletedPlayableSeqFrom: deletedPlayableCount > 0 ? deletedPlayablePrefix + 1 : null,
+        deletedPlayableSeqTo: deletedPlayableCount > 0 ? deletedPlayablePrefix + deletedPlayableCount : null,
+        deletedAssistantSeqFrom: deletedAssistantCount > 0 ? deletedAssistantPrefix + 1 : null,
+        deletedAssistantSeqTo: deletedAssistantCount > 0 ? deletedAssistantPrefix + deletedAssistantCount : null,
     });
 }
 
@@ -3817,15 +4038,35 @@ export async function sendTextareaMessage() {
 }
 
 /**
- * Formats the message text into an HTML string using Markdown and other formatting.
- * @param {string} mes Message text
- * @param {string} ch_name Character name
- * @param {boolean} isSystem If the message was sent by the system
- * @param {boolean} isUser If the message was sent by the user
- * @param {number} messageId Message index in chat array
- * @param {Partial<DOMPurify.Config>} [sanitizerOverrides] DOMPurify sanitizer option overrides
- * @param {boolean} [isReasoning] If the message is reasoning output
- * @returns {string} HTML string
+ * Formats raw message text into an HTML string ready for DOM insertion.
+ *
+ * The pipeline is, in order:
+ *   1. Prompt-bias stripping (message 0 only)
+ *   2. Comment / hidden-message normalisation
+ *   3. `beforeRegex` extension hooks (see {@link MessageFormatter})
+ *   4. Custom regex rules (`getRegexedString`)
+ *   5. `afterRegex` extension hooks
+ *   6. Markdown auto-fix (`fixMarkdown`)
+ *   7. HTML tag encoding (`encode_tags`)
+ *   8. Showdown Markdown → HTML conversion
+ *   9. `afterMarkdown` extension hooks
+ *  10. Name-prefix stripping (`allow_name2_display`)
+ *  11. DOMPurify sanitization
+ *
+ * All extension hooks run **before** DOMPurify (steps 3, 5, 9) so their
+ * output is always sanitised.
+ *
+ * @param {string} mes - Raw message text.
+ * @param {string} ch_name - Character name associated with the message.
+ * @param {boolean} isSystem - Whether the message is a system message.
+ * @param {boolean} isUser - Whether the message was sent by the user.
+ * @param {number} messageId - Index of the message in the chat array, or -1
+ *   for transient messages (e.g. streaming previews).
+ * @param {Partial<DOMPurify.Config>} [sanitizerOverrides] - DOMPurify option
+ *   overrides. Merged on top of the default config.
+ * @param {boolean} [isReasoning=false] - Whether the message is reasoning/thinking
+ *   output (affects regex placement and some display rules).
+ * @returns {string} Sanitized HTML string ready to assign to `innerHTML`.
  */
 export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, sanitizerOverrides = {}, isReasoning = false) {
     if (!mes) {
@@ -3882,12 +4123,20 @@ export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, san
         const indexOf = usableMessages.findIndex(x => x.index === Number(messageId));
         const depth = messageId >= 0 && indexOf !== -1 ? (usableMessages.length - indexOf - 1) : undefined;
 
+        mes = MessageFormatter.runStage(MessageFormatter.stage.BEFORE_REGEX, mes,
+            { ch_name, isSystem, isUser, messageId, isReasoning },
+        );
+
         // Always override the character name
         mes = getRegexedString(mes, regexPlacement, {
             characterOverride: ch_name,
             isMarkdown: true,
             depth: depth,
         });
+
+        mes = MessageFormatter.runStage(MessageFormatter.stage.AFTER_REGEX, mes,
+            { ch_name, isSystem, isUser, messageId, isReasoning },
+        );
     }
 
     if (power_user.auto_fix_generated_markdown) {
@@ -3966,6 +4215,10 @@ export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, san
         mes = mes.replace(/<code(.*)>[\s\S]*?<\/code>/g, function (match) {
             return match.replace(/&amp;/g, '&');
         });
+
+        mes = MessageFormatter.runStage(MessageFormatter.stage.AFTER_MARKDOWN, mes,
+            { ch_name, isSystem, isUser, messageId, isReasoning },
+        );
     }
 
     if (!power_user.allow_name2_display && ch_name && !isUser && !isSystem) {
@@ -7560,6 +7813,17 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         coreChat.pop();
     }
 
+    // Tool invocation summaries are persisted as compact system display messages
+    // that get merged back into their owning assistant turn at prompt-build time
+    // (see below). When that owner turn is hidden — via /hide (is_system), the
+    // ignore symbol, or a regex script blanking the message text — the merged
+    // tool_calls would keep flowing to the provider on top of a hidden turn.
+    // Resolve the owner of every invocation summary while the full raw chat is
+    // still available (hidden messages are filtered out of coreChat above, so
+    // the merge step below cannot see them), and drop summaries whose owner is
+    // hidden. The message-emptiness check happens post-regex at the merge step.
+    const invocationOwnerBySummary = canUseTools ? resolveToolInvocationOwners(chat, coreChat) : null;
+
     coreChat = await Promise.all(coreChat.map(async (/** @type {ChatMessage} */ chatItem, index) => {
         let message = chatItem.mes;
         let regexType = chatItem.is_user ? regex_placement.USER_INPUT : regex_placement.AI_OUTPUT;
@@ -7591,35 +7855,72 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     }));
 
     if (canUseTools) {
-        const normalizedCoreChat = [];
+        const coreChatByIndex = new Map(coreChat.map(x => [x.index, x]));
+        // Summaries absorbed into an owner turn (merged) or dropped by a
+        // hiding gesture. Anything else survives as a standalone entry —
+        // most importantly the summary of the round currently generating:
+        // the recursive Generate() call runs before the final reply
+        // exists, so its owner is not in the chat yet and the tool results
+        // must reach the model unmerged.
+        const consumedSummaryIndexes = new Set();
         for (const chatItem of coreChat) {
             const invocations = chatItem?.extra?.tool_invocations;
-            const previousMessage = normalizedCoreChat[normalizedCoreChat.length - 1];
-            const shouldMergeToolInvocationSummary =
-                chatItem?.extra?.isSmallSys === true
-                && Array.isArray(invocations)
-                && invocations.length > 0
-                && previousMessage
-                && !previousMessage.is_user
-                && previousMessage?.extra?.type !== system_message_types.NARRATOR;
+            const isInvocationSummary = chatItem?.extra?.isSmallSys === true && Array.isArray(invocations) && invocations.length > 0;
 
-            if (shouldMergeToolInvocationSummary) {
-                normalizedCoreChat[normalizedCoreChat.length - 1] = {
-                    ...previousMessage,
-                    extra: {
-                        ...(previousMessage.extra || {}),
-                        tool_invocations: Array.isArray(previousMessage?.extra?.tool_invocations)
-                            ? previousMessage.extra.tool_invocations.concat(invocations)
-                            : invocations.slice(),
-                    },
-                };
-                continue;
+            if (isInvocationSummary) {
+                const owner = invocationOwnerBySummary?.get(chatItem.index);
+                // The summary's owner turn is hidden (dropped above) — drop the
+                // summary with it so hidden tool history cannot reach the provider.
+                if (owner?.hidden) {
+                    consumedSummaryIndexes.add(chatItem.index);
+                    continue;
+                }
+                // Non-streaming histories store the summary between the user
+                // turn and the final reply, so the owning assistant turn sits
+                // AFTER the summary, not before it. Merge by resolved owner
+                // index instead of guessing from the normalized tail.
+                if (owner && owner.ownerCoreIndex >= 0) {
+                    const targetMessage = coreChatByIndex.get(owner.ownerCoreIndex);
+                    // A regex script on the prompt lane may blank out the owner's
+                    // text. That is a hiding gesture the same way /hide is, so the
+                    // tool records owned by a blanked turn drop too — the summary
+                    // must NOT survive as a standalone entry, or its structured
+                    // invocations would still reach the provider. Reasoning
+                    // rounds legitimately produce an empty-text owner (the model
+                    // returned reasoning + tool_calls, no visible text) — those
+                    // must keep their invocations or the wire shape for reasoning
+                    // models breaks.
+                    if (targetMessage && isBlankMessageText(targetMessage.mes) && !hasMessageReasoning(targetMessage)) {
+                        consumedSummaryIndexes.add(chatItem.index);
+                        continue;
+                    }
+                    const shouldMergeIntoOwner =
+                        targetMessage
+                        && !targetMessage.is_user
+                        && targetMessage?.extra?.type !== system_message_types.NARRATOR;
+
+                    if (shouldMergeIntoOwner) {
+                        coreChatByIndex.set(owner.ownerCoreIndex, {
+                            ...targetMessage,
+                            extra: {
+                                ...(targetMessage.extra || {}),
+                                tool_invocations: Array.isArray(targetMessage?.extra?.tool_invocations)
+                                    ? targetMessage.extra.tool_invocations.concat(invocations)
+                                    : invocations.slice(),
+                            },
+                        });
+                        consumedSummaryIndexes.add(chatItem.index);
+                        continue;
+                    }
+                }
             }
-
-            normalizedCoreChat.push(chatItem);
         }
 
-        coreChat = normalizedCoreChat;
+        // Rebuild in original order: owner entries that absorbed invocations
+        // substitute in, summaries consumed above drop out.
+        coreChat = coreChat
+            .filter(x => !(x?.extra?.isSmallSys === true && Array.isArray(x.extra?.tool_invocations) && x.extra.tool_invocations.length > 0 && consumedSummaryIndexes.has(x.index)))
+            .map(x => coreChatByIndex.get(x.index) ?? x);
     }
 
     const promptReasoning = new PromptReasoning();
@@ -15756,7 +16057,7 @@ function renderEditedMessage(messageId, { messageElement = null, bias = undefine
     return resolvedMessageElement;
 }
 
-function openMessageDelete(fromSlashCommand) {
+function openMessageDelete(fromSlashCommand, deleteToolCalls = true) {
     closeMessageEditor();
     hideSwipeButtons();
     if (fromSlashCommand || (!is_send_press) || (selected_group && !is_group_generating)) {
@@ -15775,6 +16076,7 @@ function openMessageDelete(fromSlashCommand) {
             is_group_generating: ${is_group_generating}`);
     }
     this_del_mes = -1;
+    deleteToolCallsInDeleteMode = deleteToolCalls;
     is_delete_mode = true;
 }
 
@@ -15882,12 +16184,16 @@ async function messageEditCancel(messageId = this_edit_mes_id) {
     thisMesDiv.find('.mes_edit_buttons').css('display', 'none');
     thisMesBlock.find('.mes_buttons').css('display', '');
 
-    const reasoningEditDone = thisMesBlock.find('.mes_reasoning_edit_cancel:visible');
-    if (reasoningEditDone.length > 0) {
-        reasoningEditDone.trigger('click');
-    }
-
+    // Render the message text first so the message editor is gone before the
+    // reasoning editor is cancelled: while both editors are open CSS hides
+    // `.mes_reasoning_actions`, so the `:visible` check below would match
+    // nothing and the reasoning textarea would be stranded.
     renderEditedMessage(messageId);
+
+    const reasoningEditCancel = thisMesBlock.find('.mes_reasoning_edit_cancel:visible');
+    if (reasoningEditCancel.length > 0) {
+        reasoningEditCancel.trigger('click');
+    }
 
     if (messageId == this_edit_mes_id) {
         this_edit_mes_id = undefined;
@@ -15968,17 +16274,21 @@ async function messageEditDone(div) {
     messageElement.find('.mes_edit_buttons').css('display', 'none');
     mesBlock.find('.mes_buttons').css('display', '');
 
-    const reasoningEditDone = mesBlock.find('.mes_reasoning_edit_done:visible');
-    if (reasoningEditDone.length > 0) {
-        reasoningEditDone.trigger('click');
-    }
-
     // Close the editor before async MESSAGE_EDITED listeners run, so slow listeners
     // cannot leave the textarea stranded after the action buttons disappear.
     renderEditedMessage(editedMessageId, {
         bias: chat[editedMessageId]?.extra?.bias ?? bias,
         updateBias: true,
     });
+
+    // Must run after the message textarea is gone: while both editors are open
+    // CSS hides `.mes_reasoning_actions`, so the visible check below would match
+    // nothing and the reasoning editor would stay stranded.
+    const reasoningEditDone = mesBlock.find('.mes_reasoning_edit_done:visible');
+    if (reasoningEditDone.length > 0) {
+        reasoningEditDone.trigger('click');
+    }
+
     this_edit_mes_id = undefined;
 
     await eventSource.emit(event_types.MESSAGE_EDITED, editedMessageId, getChatMessageMutationMeta(editedMessageId));
@@ -19412,6 +19722,7 @@ jQuery(async function () {
         });
         $(this).addClass('selected'); //sets the bg of the mes selected for deletion
         var i = Number($(this).attr('mesid')); //checks the message ID in the chat
+        i = getMessageDeletionStartId(i, deleteToolCallsInDeleteMode);
         this_del_mes = i;
         //as long as the current message ID is less than the total chat length
         while (i < chat.length) {
@@ -20633,6 +20944,7 @@ jQuery(async function () {
     ///////////// OPTIMIZED LISTENERS FOR LEFT SIDE OPTIONS POPUP MENU //////////////////////
     $('#options [id]').on('click', async function (event, customData) {
         const fromSlashCommand = customData?.fromSlashCommand || false;
+        const deleteToolCalls = customData?.deleteToolCalls ?? true;
         var id = $(this).attr('id');
 
         // Check whether a custom prompt was provided via custom data (for example through a slash command)
@@ -20711,7 +21023,7 @@ jQuery(async function () {
                 Generate('continue', buildOrFillAdditionalArgs());
             }
         } else if (id == 'option_delete_mes') {
-            setTimeout(() => openMessageDelete(fromSlashCommand), animation_duration);
+            setTimeout(() => openMessageDelete(fromSlashCommand, deleteToolCalls), animation_duration);
         } else if (id == 'option_search_chat') {
             await toggleCurrentChatToolsPanel();
         } else if (id == 'option_close_chat') {
@@ -21652,7 +21964,17 @@ jQuery(async function () {
 
     $(window).on('beforeunload', (event) => {
         cancelTtsPlay();
-        if (streamingProcessor) {
+        // Only abort the in-flight stream when the reply is NOT recoverable
+        // server-side. For a recoverable generation (normal / regenerate on a
+        // server-persistence API) the job survives the disconnect by design:
+        // aborting here would fire the ws-delivery abort notification
+        // (/api/generation/:id/abort), kill the upstream fetch mid-stream
+        // (inspector shows 'The operation was aborted' / status 'aborted')
+        // and leave nothing to recover for the reopened tab.
+        const isRecoverableGeneration = Boolean(streamingProcessor)
+            && shouldUseLukerServerPersistenceForType(streamingProcessor.type)
+            && supportsLukerServerPersistence(main_api);
+        if (streamingProcessor && !isRecoverableGeneration) {
             console.log('Page reloaded. Aborting streaming...');
             streamingProcessor.onStopStreaming();
         }

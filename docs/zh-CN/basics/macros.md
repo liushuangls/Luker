@@ -289,6 +289,39 @@ body 里：
 {{/each}}
 ```
 
+### 单键读写 —— <code v-pre>{{getvarkey}}</code> / <code v-pre>{{setvarkey}}</code>
+
+::: tip 实现来源说明
+本节的按键寻址宏族来自 SillyTavern 原版；[点号路径](#结构化值的点号路径)则是 Luker 的扩展，单个宏即可访问任意深度。为兼容面向原版 SillyTavern 编写的内容，两种写法均可用。
+:::
+
+SillyTavern 的按键寻址宏族可以直接使用：
+
+| 宏 | 别名 | 作用域 |
+|---|---|---|
+| <code v-pre>{{getvarkey::name::key}}</code> | `getvarindex` | 局部 |
+| <code v-pre>{{setvarkey::name::key::value}}</code> | `setvarindex` | 局部 |
+| <code v-pre>{{getglobalvarkey::name::key}}</code> | `getglobalvarindex` | 全局 |
+| <code v-pre>{{setglobalvarkey::name::key::value}}</code> | `setglobalvarindex` | 全局 |
+
+它们读写 JSON 字符串化变量里的**单个**键（或数组下标）。键看起来是数字时会建成数组，否则建成对象：
+
+```text
+{{setvarkey::roster::alice::40}}[{{getvarkey::roster::alice}}]  → [40]
+{{setvarkey::log::0::first}}{{setvarkey::log::1::second}}        → 键是数字，所以 `log` 是数组
+[{{getvarkey::log::1}}]                                          → [second]
+```
+
+新写的内容建议优先用上面的[点号路径](#结构化值的点号路径)：一个宏就能抵达任意深度，写入也用同一套语法。`varkey` 只能处理一层，要写到 `roster.alice.hp` 得自己拼「读—改—写」。
+
+它有一件点号路径做不到的事：键会被**原样**取用，所以当键本身含点号时只能用它。
+
+```text
+{{setvarkey::metrics::p95.latency::120}}   → 设置字面键 "p95.latency"
+{{getvarkey::metrics::p95.latency}}        → 120
+{{getvar::metrics.p95.latency}}            → 空：点号形式会在每个点处切分
+```
+
 ### 逐楼层变量 {#per-message-variables}
 
 原生 SillyTavern 里，副作用宏 <code v-pre>{{setvar::hp::50}}</code> 只在 *prompt 范本* 里（预设、世界书、首楼）才会运行。AI 在回复里写同样的字面量什么都不会发生，还会原样显示出来污染叙事。
@@ -500,28 +533,33 @@ Luker 用**逐楼层变量提取**解决这个问题。一条消息（AI 回复�
 | `!` | 比同段文本里的其他宏先解析 | 仅解析 |
 | `?` | 比其他宏后解析 | 仅解析 |
 | `~` | 标记为可重新求值 | 仅解析 |
-| `>` | 把 `\|` 当输出过滤器的管道 | 仅解析（见下文 *管道符*）|
+| `>` | 把 `\|` 当输出过滤器的管道 | 无效果（见下文 *管道符*）|
 
 这些 token 解析器能识别，但运行时没有任何 hook 消费它们。<code v-pre>{{if !.dead}}</code> 里的 `!` 是另一回事——那是 <code v-pre>{{if}}</code> 内部的条件取反，不是这里的标志位。
 
 标志位之间、标志位和宏名之间都允许空白，多个可以组合：<code v-pre>{{ #each ::list}} … {{/each}}</code>。
 
-### `|` — 管道符（参数终止符）
+### `|` — 管道符（普通字符）
 
-管道符 `\|` 在宏参数里有特殊语义，**即使没加 `>` 标志也一样**。lexer 见到 `\|` 就会从「参数」模式切走，所以：
+::: tip 与 SillyTavern 行为差异的由来
+原版 SillyTavern 将管道符解析为参数终止符，并支持 <code v-pre>{{macro|uppercase}}</code> 一类输出修饰器。该实现在上游被暂时禁用（issue #5618），Luker 遵循上游的词法分析器，因此本节描述的行为与上游保持一致。
+:::
 
-```text
-{{getvar::name|filter}}
-```
-
-…会被解析为 `getvar` 宏 + 单个参数 `name` + 一个名为 `filter` 的「过滤器」标识符。过滤器执行链没接上，所以 `filter` 这个名字会被丢掉，整个宏的行为等价于 <code v-pre>{{getvar::name}}</code>。直接后果是：**参数里出现字面 `\|` 会把那个参数截断**——想要在参数里保留字面管道符，转义成 `\|`：
+管道符在宏参数里没有特殊含义。lexer 不把 `|` 当参数终止符，所以它是普通内容，会原样传给宏：
 
 ```text
-{{setvar::menu::sword \| shield \| bow}}
+{{setvar::menu::sword | shield | bow}}   → 存入 "sword | shield | bow"
+{{getvar::name|filter}}                  → 读取名为 `name|filter` 的变量
 ```
 
-::: warning 管道符是预留语法
-今天写 <code v-pre>{{macro\|uppercase}}</code> 并**不会**把内容转大写——只是不报错地解析掉、丢掉过滤器名、把管道符前面的参数交给宏。要做字符串变换，写一个注册宏，或者用 regex 扩展。完整的管道过滤链留给将来的引擎版本。
+管道符没有转义写法；反斜杠会被原样存入：
+
+```text
+{{setvar::k::a \| b}}   → 存入 "a \| b"
+```
+
+::: warning 输出修饰器不可用
+<code v-pre>{{macro|uppercase}}</code> 不会把任何内容转大写。需要字符串变换的话，请注册自定义宏，或使用 regex 扩展。
 :::
 
 ## 斜杠命令里的管道宏 —— <code v-pre>{{pipe}}</code>、<code v-pre>{{var::name}}</code>
@@ -535,7 +573,7 @@ Luker 用**逐楼层变量提取**解决这个问题。一条消息（AI 回复�
 
 这两个只在斜杠命令解析器里存在。不在 STscript 上下文里出现时，它们会原样输出。
 
-STscript 里的 `\|` 是命令管道符，那是命令解析器的特性，不是宏引擎的。在单个宏的参数内部，`\|` 按上面*管道符*那一节的规则处理。
+STscript 里的 `|` 是命令管道符，那是命令解析器的特性，不是宏引擎的。在单个宏的参数内部，`|` 按上面*管道符*那一节的规则处理。
 
 ## 解析语义
 

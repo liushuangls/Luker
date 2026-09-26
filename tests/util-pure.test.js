@@ -30,6 +30,8 @@ import {
     generateTimestamp,
     mergeObjectWithYaml,
     excludeKeysByYaml,
+    modelIdMatchesFamily,
+    getArrayBufferSlice,
     Cache,
     MemoryLimitedMap,
 } from '../src/util';
@@ -536,6 +538,25 @@ describe('mergeObjectWithYaml', () => {
     });
 });
 
+describe('getArrayBufferSlice', () => {
+    test('returns an exact ArrayBuffer for Buffer views', () => {
+        const source = Buffer.alloc(16, 0);
+        source.write('abc', 4, 'utf8');
+        const view = source.subarray(4, 7);
+
+        expect(view.byteLength).toBe(3);
+        expect(view.buffer.byteLength).toBe(16);
+
+        const exact = getArrayBufferSlice(view);
+        expect(exact.byteLength).toBe(3);
+        expect(Buffer.from(exact).toString('utf8')).toBe('abc');
+    });
+
+    test('throws for non-Uint8Array input', () => {
+        expect(() => getArrayBufferSlice('abc')).toThrow(TypeError);
+    });
+});
+
 describe('excludeKeysByYaml', () => {
     test('should delete keys listed in a YAML array', () => {
         const obj = { a: 1, b: 2, c: 3 };
@@ -702,5 +723,28 @@ describe('MemoryLimitedMap', () => {
         expect(MemoryLimitedMap.estimateStringSize('hello')).toBe(10);
         expect(MemoryLimitedMap.estimateStringSize('')).toBe(0);
         expect(MemoryLimitedMap.estimateStringSize(null)).toBe(0);
+    });
+});
+
+describe('modelIdMatchesFamily', () => {
+    test('matches bare model ids', () => {
+        expect(modelIdMatchesFamily('kimi-k3', /^kimi-k3/)).toBe(true);
+        expect(modelIdMatchesFamily('claude-sonnet-4-5', /^claude-sonnet-4/)).toBe(true);
+    });
+
+    test('strips vendor namespace prefixes (last path segment wins)', () => {
+        expect(modelIdMatchesFamily('moonshotai/kimi-k3', /^kimi-k3/)).toBe(true);
+        expect(modelIdMatchesFamily('moonshot/kimi-k2.6-0915', /^kimi-k2\.6/)).toBe(true);
+        expect(modelIdMatchesFamily('anthropic/claude-sonnet-4-5', /^claude-sonnet-4/)).toBe(true);
+    });
+
+    test('does not match when the tail segment differs', () => {
+        expect(modelIdMatchesFamily('kimi-latest', /^kimi-k3/)).toBe(false);
+        expect(modelIdMatchesFamily('moonshotai/kimi-latest', /^kimi-k3/)).toBe(false);
+    });
+
+    test('coerces non-string input via String()', () => {
+        expect(modelIdMatchesFamily(null, /^kimi-k3/)).toBe(false);
+        expect(modelIdMatchesFamily(undefined, /^kimi-k3/)).toBe(false);
     });
 });

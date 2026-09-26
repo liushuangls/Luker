@@ -32,15 +32,19 @@ import {
     OPENAI_REASONING_EFFORT_MODELS,
     OPENAI_VERBOSITY_MODELS,
     OPENROUTER_HEADERS,
+    POLLINATIONS_ENDPOINT,
     SILICONFLOW_ENDPOINT,
     ZAI_ENDPOINT,
 } from '../../../constants.js';
+import { createHmac } from 'node:crypto';
 import { SECRET_KEYS } from '../../../endpoints/secrets.js';
+import { getCookieSecret } from '../../../users.js';
 import { TEXT_COMPLETION_MODELS } from '../../../endpoints/tokenizers.js';
 import {
     excludeKeysByYaml,
     getConfigValue,
     mergeObjectWithYaml,
+    modelIdMatchesFamily,
     normalizeOpenAIBaseUrl,
     uuidv4,
 } from '../../../util.js';
@@ -68,6 +72,7 @@ const API_PERPLEXITY = 'https://api.perplexity.ai';
 const API_GROQ = 'https://api.groq.com/openai/v1';
 const API_NANOGPT = 'https://nano-gpt.com/api/v1';
 const API_POLLINATIONS = 'https://gen.pollinations.ai/v1';
+const API_POLLINATIONS_ANON = 'https://text.pollinations.ai/v1';
 const API_MOONSHOT = 'https://api.moonshot.ai/v1';
 const API_FIREWORKS = 'https://api.fireworks.ai/inference/v1';
 const API_COMETAPI = 'https://api.cometapi.com/v1';
@@ -76,6 +81,18 @@ const API_ZAI_CODING = 'https://api.z.ai/api/coding/paas/v4';
 const API_SILICONFLOW = 'https://api.siliconflow.com/v1';
 const API_SILICONFLOW_CN = 'https://api.siliconflow.cn/v1';
 const API_WORKERS_AI = 'https://api.cloudflare.com/client/v4/accounts';
+
+/**
+ * Lazily-cached HMAC key (instance cookie secret) for session-affinity hashing.
+ * @type {string|undefined}
+ */
+let affinityKey;
+function getAffinityKey() {
+    if (affinityKey === undefined) {
+        affinityKey = getCookieSecret(globalThis.DATA_ROOT);
+    }
+    return affinityKey;
+}
 
 // Cache for cacheable (writing) OpenRouter model IDs. Populated on-demand by
 // isOpenRouterModelCacheable; mirrors the module-scope cache used by the
@@ -252,6 +269,10 @@ async function resolveOpenRouter(ctx) {
         plugins: getOpenRouterPlugins(body),
         reasoning: { exclude: !includeReasoning },
     };
+    if (body.logprobs > 0) {
+        bodyParams['top_logprobs'] = body.logprobs;
+        bodyParams['logprobs'] = true;
+    }
     if (body.min_p !== undefined) bodyParams['min_p'] = body.min_p;
     if (body.top_a !== undefined) bodyParams['top_a'] = body.top_a;
     if (body.repetition_penalty !== undefined) bodyParams['repetition_penalty'] = body.repetition_penalty;
@@ -401,6 +422,9 @@ async function resolveFireworks(ctx) {
     const headers = {};
     /** @type {any} */
     const bodyParams = {};
+    if (body.reasoning_effort) {
+        bodyParams['reasoning_effort'] = body.reasoning_effort;
+    }
     if (body.json_schema) {
         bodyParams['response_format'] = {
             type: 'json_schema',
@@ -411,6 +435,9 @@ async function resolveFireworks(ctx) {
                 strict: body.json_schema.strict ?? true,
             },
         };
+    }
+    if (body.chat_id) {
+        headers['x-session-affinity'] = createHmac('sha256', getAffinityKey()).update(body.chat_id).digest('hex').slice(0, 16);
     }
     return { apiUrl, apiKey, headers, bodyParams };
 }
@@ -450,20 +477,23 @@ async function resolveNanogpt(ctx) {
 /** POLLINATIONS — chat-completions.js:3169-3184 (uses readSecret with secret_id, not readProviderSecret) */
 async function resolvePollinations(ctx) {
     const body = ctx.body;
-    const apiUrl = API_POLLINATIONS;
+    const isAnonymous = body.pollinations_endpoint === POLLINATIONS_ENDPOINT.ANONYMOUS;
+    const apiUrl = isAnonymous ? API_POLLINATIONS_ANON : API_POLLINATIONS;
     const secretId = typeof body.secret_id === 'string' ? body.secret_id : undefined;
-    const apiKey = ctx.secrets.read(SECRET_KEYS.POLLINATIONS, { secretId });
+    const apiKey = isAnonymous ? 'anonymous' : ctx.secrets.read(SECRET_KEYS.POLLINATIONS, { secretId });
     const headers = {};
     /** @type {any} */
     const bodyParams = {
-        reasoning_effort: body.reasoning_effort,
         seed: body.seed ?? Math.floor(Math.random() * 99999999),
     };
-    if (body.json_schema) {
-        bodyParams['response_format'] = {
-            type: 'json_schema',
-            json_schema: { schema: body.json_schema.value },
-        };
+    if (!isAnonymous) {
+        bodyParams['reasoning_effort'] = body.reasoning_effort;
+        if (body.json_schema) {
+            bodyParams['response_format'] = {
+                type: 'json_schema',
+                json_schema: { schema: body.json_schema.value },
+            };
+        }
     }
     return { apiUrl, apiKey, headers, bodyParams };
 }
@@ -491,6 +521,58 @@ function applyKimiPartial(messages, content, name) {
     messages.push(injected);
 }
 
+/**
+ * Kimi reasoning params differ per model family (platform.moonshot.ai docs):
+ *   kimi-k3        — top-level `reasoning_effort` (low/high/max), thinking always on
+ *   kimi-k2.6      — `thinking.type` enabled/disabled
+ *   kimi-k2.7-code — thinking always on, only `enabled` accepted
+ * Other models accept neither field.
+ *
+ * Family detection matches on the LAST path segment so vendor-prefixed ids
+ * (moonshotai/kimi-k3, moonshot/kimi-k2.6, ...) resolve to the same family.
+ */
+function getKimiModelFamily(model) {
+    if (modelIdMatchesFamily(model, /^kimi-k3/)) {
+        return 'k3';
+    }
+    if (modelIdMatchesFamily(model, /^kimi-k2\.7-code/)) {
+        return 'k2.7-code';
+    }
+    if (modelIdMatchesFamily(model, /^kimi-k2\.6/)) {
+        return 'k2.6';
+    }
+    return null;
+}
+
+function applyMoonshotReasoningParams(bodyParams, model, effort) {
+    const hasEffort = typeof effort === 'string' && effort.length > 0;
+    const family = getKimiModelFamily(model);
+    if (family === 'k3') {
+        if (!hasEffort || effort === 'auto') {
+            return;
+        }
+        // K3 accepts low/high/max only; ST's six buckets collapse onto them.
+        const K3_EFFORT_MAP = { min: 'low', low: 'low', medium: 'high', high: 'high', max: 'max' };
+        bodyParams.reasoning_effort = K3_EFFORT_MAP[effort];
+        return;
+    }
+    if (family === 'k2.7-code') {
+        bodyParams.thinking = { type: 'enabled' };
+        return;
+    }
+    if (family === 'k2.6') {
+        // keep:'all' = Preserved Thinking. K2.6's server default is keep:null,
+        // which silently drops echoed historical reasoning_content — without
+        // this, the reasoning we replay from chat history is ignored upstream.
+        if (!hasEffort || effort === 'auto') {
+            bodyParams.thinking = { type: 'enabled', keep: 'all' };
+            return;
+        }
+        // min is the only ST bucket that maps to thinking off; the rest enable it.
+        bodyParams.thinking = { type: effort === 'min' ? 'disabled' : 'enabled', keep: 'all' };
+    }
+}
+
 /** MOONSHOT — chat-completions.js:3185-3195 */
 async function resolveMoonshot(ctx) {
     const body = ctx.body;
@@ -499,7 +581,7 @@ async function resolveMoonshot(ctx) {
     const headers = {};
     /** @type {any} */
     const bodyParams = {};
-    if (body.reasoning_effort) bodyParams.thinking = { type: 'enabled' };
+    applyMoonshotReasoningParams(bodyParams, body.model, body.reasoning_effort);
     // Kimi K3 / K2.7-code always keep Preserved Thinking; K2.6 with thinking.keep="all" does too.
     // In all cases, previous turns' reasoning must be echoed as `reasoning_content` (Moonshot's
     // field name), not `reasoning` (which is what setOpenAIMessages / getChat emit). Rename in place.

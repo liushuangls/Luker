@@ -129,6 +129,7 @@ import {
     synthesizePersistedStateFromStoreAndMeta,
     hasPersistedStoreMetadataChanges,
     getStoreCoveredSeqTo,
+    resolveStoreCommitSeq,
     getCachedMeta,
     setCachedMeta,
     clearCachedMeta,
@@ -1465,7 +1466,7 @@ async function replaceGraphLogForTarget(context, store, seq, floor) {
     const fs = await getFloorStateInstance(context);
     await fs.ready();
     const normalizedStore = normalizeStoreForRuntime(store);
-    const normalizedSeq = Math.max(0, Math.floor(Number(seq || getStoreCoveredSeqTo(normalizedStore) || 0)));
+    const normalizedSeq = resolveStoreCommitSeq(seq, normalizedStore);
     const finalPayload = graphPayloadFromStore(normalizedStore);
     finalPayload.coveredAssistantSeq = Math.max(finalPayload.coveredAssistantSeq, normalizedSeq);
     finalPayload.appliedSeqTo = Math.max(finalPayload.appliedSeqTo, normalizedSeq);
@@ -1633,7 +1634,7 @@ async function commitMemoryStoreReplaceByChatKey(context, chatKey, store, seq, {
         throw new Error('Memory store target is unavailable.');
     }
     const normalizedStore = normalizeStoreForRuntime(store);
-    const normalizedSeq = Math.max(0, Math.floor(Number(seq || getStoreCoveredSeqTo(normalizedStore) || 0)));
+    const normalizedSeq = resolveStoreCommitSeq(seq, normalizedStore);
 
     const replaceResult = await replaceGraphLogForTarget(context, normalizedStore, normalizedSeq, floor);
     if (replaceResult.skipped) {
@@ -1697,7 +1698,7 @@ async function commitMemoryStoreDiffByChatKey(context, chatKey, beforeStore, aft
     const fs = await getFloorStateInstance(context);
     const normalizedBefore = normalizeStoreForRuntime(beforeStore);
     const normalizedAfter = normalizeStoreForRuntime(afterStore);
-    const normalizedSeq = Math.max(0, Math.floor(Number(seq || getStoreCoveredSeqTo(normalizedAfter) || 0)));
+    const normalizedSeq = resolveStoreCommitSeq(seq, normalizedAfter);
 
     const beforePayload = graphPayloadFromStore(normalizedBefore);
     const afterPayload = graphPayloadFromStore(normalizedAfter);
@@ -2599,6 +2600,26 @@ export function findAffectedAssistantSeqFromMessageIndex(context, messageIndex) 
         if (i >= targetIndex) {
             return assistantSeq;
         }
+    }
+    // Extractable-walk miss on an assistant-role target: the slot's body was
+    // wiped before MESSAGE_SWIPED fired (overswipe REGENERATE clears
+    // chat[mesId].mes before animateSwipe emits), so the walk above skips it
+    // and would return null — which applyMutationInvalidationImpl feeds to
+    // shouldPreserveLatestRecallSnapshotForAssistantMutation as fromSeq=null,
+    // killing the recall snapshot and forcing a fresh RAG recall on every
+    // swipe retry. Fall back to role-based counting (!is_user && !is_system),
+    // the same coordinate system buildLastUserAnchorFromMessages uses for
+    // anchorAssistantFloor, so the preserve check compares like with like.
+    const target = source[targetIndex];
+    if (target && !target.is_user && !target.is_system) {
+        let roleAssistantSeq = 0;
+        for (let i = 0; i <= targetIndex && i < source.length; i++) {
+            const message = source[i];
+            if (message && !message.is_user && !message.is_system) {
+                roleAssistantSeq += 1;
+            }
+        }
+        return roleAssistantSeq;
     }
     return null;
 }
@@ -10803,9 +10824,7 @@ ${renderEdgeFormEditorHtml(latest, editorId, edge, selectedEdgeIndex)}
     const persistLatest = async (latest, successText, statusText, { beforeStore = null, replaceGraph = false, seq = null } = {}) => {
         memoryStoreCache.set(chatKey, latest);
         clearRollbackHistory(chatKey);
-        const effectiveSeq = Number.isFinite(Number(seq))
-            ? Math.max(0, Math.floor(Number(seq)))
-            : getStoreCoveredSeqTo(latest);
+        const effectiveSeq = resolveStoreCommitSeq(seq, latest);
         const editorSaveFloor = seqToFloor(context, effectiveSeq);
         // Defaults assume "no inner commit was attempted" → treated as success
         // for the paths that don't call commitMemoryStore*ByChatKey at all.

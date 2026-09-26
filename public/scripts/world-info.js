@@ -1,7 +1,7 @@
 import { Fuse } from '../lib.js';
 
-import { saveSettings, substituteParams, getRequestHeaders, chat_metadata, this_chid, characters, saveCharacterDebounced, menu_type, eventSource, event_types, getExtensionPromptByName, saveMetadata, getCurrentChatId, extension_prompt_roles, create_save, name1, buildObjectPatchOperationsAsync, requestAsyncDiffForNextSettingsSave, getOneCharacter, select_selected_character } from '../script.js';
-import { areLookupNamesEqual, download, debounce, findCanonicalIndexInList, findCanonicalNameInList, initScrollHeight, resetScrollHeight, parseJsonFile, extractDataFromPng, getFileBuffer, getCharaFilename, getSortableDelay, escapeRegex, PAGINATION_TEMPLATE, navigation_option, waitUntilCondition, isTrueBoolean, setValueByPath, flashHighlight, select2ModifyOptions, getSelect2OptionId, dynamicSelect2DataViaAjax, highlightRegex, select2ChoiceClickSubscribe, isFalseBoolean, getSanitizedFilename, checkOverwriteExistingData, getStringHash, parseStringArray, cancelDebounce, findChar, onlyUnique, equalsIgnoreCaseAndAccents, uuidv4, normalizeArray, getUniqueName, logSlashCommandWarn, addLongPressEvent, escapeHtml } from './utils.js';
+import { saveSettings, substituteParams, getRequestHeaders, chat_metadata, this_chid, characters, saveCharacterDebounced, menu_type, eventSource, event_types, getExtensionPromptByName, saveMetadata, getCurrentChatId, extension_prompt_roles, create_save, createOrEditCharacter, name1, buildObjectPatchOperationsAsync, requestAsyncDiffForNextSettingsSave, getOneCharacter, select_selected_character } from '../script.js';
+import { areLookupNamesEqual, download, debounce, findCanonicalIndexInList, findCanonicalNameInList, initScrollHeight, resetScrollHeight, parseJsonFile, extractDataFromPng, getFileBuffer, getCharaFilename, getSortableDelay, escapeRegex, PAGINATION_TEMPLATE, navigation_option, waitUntilCondition, isTrueBoolean, setValueByPath, flashHighlight, select2ModifyOptions, getSelect2OptionId, dynamicSelect2DataViaAjax, highlightRegex, select2ChoiceClickSubscribe, isFalseBoolean, getSanitizedFilename, checkOverwriteExistingData, getStringHash, parseStringArray, cancelDebounce, findChar, onlyUnique, equalsIgnoreCaseAndAccents, uuidv4, normalizeArray, getUniqueName, logSlashCommandWarn, addLongPressEvent, escapeHtml, setInfoBlock, clearInfoBlock } from './utils.js';
 import { extension_settings, getContext, writeExtensionField } from './extensions.js';
 import { NOTE_MODULE_NAME, metadata_keys, shouldWIAddPrompt } from './authors-note.js';
 import { isMobile } from './RossAscends-mods.js';
@@ -4840,23 +4840,60 @@ function openBulkSetFieldMenu(name, data, anchorEl) {
     // the menu). z-index in CSS lifts it above the drawer chrome.
     document.body.appendChild(menu);
     const rect = anchorEl.getBoundingClientRect();
-    menu.style.position = 'absolute';
-    menu.style.top = `${window.scrollY + rect.bottom + 2}px`;
-    menu.style.left = `${window.scrollX + rect.left}px`;
+    // The anchor lives in a position:fixed drawer, so fixed coordinates track it
+    // exactly; the app page itself never scrolls, so no scroll compensation.
+    menu.style.position = 'fixed';
+    menu.style.left = `${rect.left}px`;
+
+    // Clamp the menu inside the viewport. The page cannot be scrolled, so a
+    // menu that extends past the window's bottom edge would put its lower
+    // items out of reach: the menu's overflow-y only scrolls content inside
+    // the menu's own box, it can't bring the box itself back on screen.
+    // Size the menu to the space actually available below the anchor; when
+    // that's too tight to be usable, flip the menu above the anchor like a
+    // standard dropdown.
+    const ANCHOR_GAP_PX = 2;   // visual gap between the anchor button and the menu
+    const EDGE_MARGIN_PX = 8;  // breathing room so the menu doesn't touch the window edge
+    const MIN_MENU_HEIGHT_PX = 120; // ~4 leaf rows — a shorter below-anchor menu isn't usable, prefer flipping up
+    const spaceBelow = window.innerHeight - EDGE_MARGIN_PX - (rect.bottom + ANCHOR_GAP_PX);
+    let topPx = rect.bottom + ANCHOR_GAP_PX;
+    if (spaceBelow < MIN_MENU_HEIGHT_PX) {
+        // menu.offsetHeight is the natural height measured right after mount
+        // (CSS 70vh cap applies, inline max-height not yet set).
+        topPx = Math.max(EDGE_MARGIN_PX, rect.top - ANCHOR_GAP_PX - menu.offsetHeight);
+    }
+    const availableHeight = window.innerHeight - EDGE_MARGIN_PX - topPx;
+    menu.style.top = `${topPx}px`;
+    menu.style.maxHeight = `${Math.max(availableHeight, MIN_MENU_HEIGHT_PX)}px`;
 
     // Belt-and-suspenders: stop pointer events from bubbling out of the menu so that no
     // outer listener (drawer close-on-outside-click, focus trackers, etc.) reacts to a
-    // click that is logically inside our menu.
+    // click that is logically inside our menu. touchstart must be shielded too: the
+    // global drawer auto-close handler (script.js) listens for BOTH touchstart and
+    // mousedown on <html>, and the menu lives on document.body — outside every drawer
+    // — so an unshielded touchstart closes the drawer before the tap's click even fires.
     const stopBubble = (event) => { event.stopPropagation(); };
+    menu.addEventListener('touchstart', stopBubble, { passive: true });
     menu.addEventListener('mousedown', stopBubble);
     menu.addEventListener('click', stopBubble);
 
     const onOutside = (event) => {
         if (menu.contains(event.target)) {
-            // Click is INSIDE our menu — also stop the event in capture phase so
-            // any other capture-phase listener that runs after us doesn't react
+            // Click is INSIDE our menu — also stop the event in capture stage so
+            // any other capture-stage listener that runs after us doesn't react
             // to a click that logically belongs to us. Click events still dispatch
-            // to the leaf's bubble-phase handler, so menu items remain clickable.
+            // to the leaf's bubble-stage handler, so menu items remain clickable.
+            event.stopPropagation();
+            return;
+        }
+        closeBulkSetFieldMenu();
+    };
+    const onOutsideTouch = (event) => {
+        if (menu.contains(event.target)) {
+            // Same capture-stage shield for touch: the global drawer
+            // auto-close handler listens for touchstart on <html> in bubble
+            // stage; this document-level capture runs first and keeps the
+            // drawer open while the user taps inside the menu.
             event.stopPropagation();
             return;
         }
@@ -4864,15 +4901,22 @@ function openBulkSetFieldMenu(name, data, anchorEl) {
     };
     const onEscape = (event) => {
         if (event.key === 'Escape') {
+            // Dismiss the dropdown only. stopPropagation keeps the global
+            // Escape handler (RossAscends-mods.js #handleEscape) from also
+            // closing the World Info drawer underneath — Escape dismissal of
+            // a transient dropdown must not cascade to the host panel.
+            event.stopPropagation();
             closeBulkSetFieldMenu();
         }
     };
     document.addEventListener('mousedown', onOutside, true);
+    document.addEventListener('touchstart', onOutsideTouch, { capture: true, passive: true });
     document.addEventListener('keydown', onEscape, true);
 
     _activeBulkMenuTeardown = () => {
         menu.remove();
         document.removeEventListener('mousedown', onOutside, true);
+        document.removeEventListener('touchstart', onOutsideTouch, { capture: true, passive: true });
         document.removeEventListener('keydown', onEscape, true);
     };
 }
@@ -6348,45 +6392,125 @@ async function displayWorldEntries(name, data, navigation = navigation_option.no
 
     $('#world_apply_current_sorting').off('click').on('click', async () => {
         const entryCount = Object.keys(data.entries).length;
-        const moreThan100 = entryCount > 100;
 
-        let content = '<span>' + t`Apply your current sorting to the "Order" field. The Order values will go down from the chosen number.` + '</span>';
-        if (moreThan100) {
-            content += '<div class="m-t-1"><i class="fa-solid fa-triangle-exclamation" style="color: #FFD43B;"></i> ' + t`More than 100 entries in this world. If you don't choose a number higher than that, the lower entries will default to 0.<br />(Usual default: 100)<br />Minimum: ${entryCount}` + '</div>';
-        }
+        const contentEl = document.createElement('div');
 
-        const result = await Popup.show.input(t`Apply Current Sorting`, content, '100', { okButton: t`Apply`, cancelButton: 'Cancel' });
-        if (!result) return;
+        const heading = document.createElement('h3');
+        heading.textContent = t`Apply Current Sorting`;
+        contentEl.appendChild(heading);
 
-        const start = Number(result);
+        const description = document.createElement('span');
+        const descriptionText = document.createElement('p');
+        descriptionText.innerHTML = t`Assigns Order values to all entries based on their current sort position.`;
+        contentEl.appendChild(descriptionText);
+        const descriptionDetail = document.createElement('p');
+        descriptionDetail.innerHTML = t`Entries are ordered <b>descending</b> by default — the first entry in the list gets the highest value and will be inserted first into the prompt.`;
+        contentEl.appendChild(descriptionDetail);
+        const entryCountText = document.createElement('small');
+        entryCountText.textContent = t`(${entryCount} entries total)`;
+        contentEl.appendChild(entryCountText);
+        contentEl.appendChild(description);
+
+        const warningEl = document.createElement('div');
+        contentEl.appendChild(warningEl);
+
+        /** @type {(startInput: HTMLInputElement, stepInput: HTMLInputElement, ascendingInput: HTMLInputElement) => void} */
+        const updateWarning = (startInput, stepInput, ascendingInput) => {
+            const startVal = Number(startInput.value);
+            const stepVal = Number(stepInput.value);
+            const isAscending = ascendingInput.checked;
+            if (!isAscending && !isNaN(startVal) && !isNaN(stepVal) && startVal - (entryCount - 1) * stepVal < 0) {
+                setInfoBlock(warningEl, t`Some entries will be clamped to Order 0, causing collisions at the bottom. The last entry would reach ${startVal - (entryCount - 1) * stepVal} (${entryCount} entries, step ${stepVal}).`, 'warning');
+            } else {
+                clearInfoBlock(warningEl);
+            }
+        };
+
+        /** @type {import('./popup.js').CustomPopupInput[]} */
+        const customInputs = [
+            {
+                id: 'wi_sort_start',
+                label: t`Starting value`,
+                tooltip: t`The Order value assigned to the first entry. In descending mode, values count down from here; in ascending mode, values count up from here.` + ' ' + t`(${entryCount} entries total)`,
+                type: 'number',
+                defaultState: '100',
+                min: 0,
+                step: 1,
+                autoFocus: true,
+            },
+            {
+                id: 'wi_sort_step',
+                label: t`Step`,
+                tooltip: t`The gap between each Order value. For example, a step of 5 produces values like 100, 95, 90... (descending) or 0, 5, 10... (ascending).`,
+                type: 'number',
+                defaultState: '1',
+                min: 1,
+                step: 1,
+            },
+            {
+                id: 'wi_sort_ascending',
+                label: t`Ascending order`,
+                tooltip: t`When checked, Order values count upward from the starting value (first sorted entry gets the lowest Order). When unchecked, values count downward (first sorted entry gets the highest Order).`,
+                type: 'checkbox',
+                defaultState: false,
+            },
+        ];
+
+        const popup = new Popup(contentEl, POPUP_TYPE.TEXT, null, {
+            okButton: t`Apply`,
+            cancelButton: t`Cancel`,
+            customInputs,
+        });
+
+        const startInput = /** @type {HTMLInputElement} */ (popup.dlg.querySelector('#wi_sort_start'));
+        const stepInput = /** @type {HTMLInputElement} */ (popup.dlg.querySelector('#wi_sort_step'));
+        const ascendingInput = /** @type {HTMLInputElement} */ (popup.dlg.querySelector('#wi_sort_ascending'));
+        startInput.addEventListener('input', () => updateWarning(startInput, stepInput, ascendingInput));
+        stepInput.addEventListener('input', () => updateWarning(startInput, stepInput, ascendingInput));
+        ascendingInput.addEventListener('change', () => updateWarning(startInput, stepInput, ascendingInput));
+        updateWarning(startInput, stepInput, ascendingInput);
+
+        const result = await popup.show();
+        if (result !== POPUP_RESULT.AFFIRMATIVE) return;
+
+        const start = Number(popup.inputResults.get('wi_sort_start') ?? '100');
+        const step = Number(popup.inputResults.get('wi_sort_step') ?? '1');
+        const ascending = Boolean(popup.inputResults.get('wi_sort_ascending'));
+
         if (isNaN(start) || start < 0) {
-            toastr.error(t`Invalid number: ${result}`, t`Apply Current Sorting`);
+            toastr.error(t`Invalid starting value: ${start}`, t`Apply Current Sorting`);
             return;
         }
-        if (start < entryCount) {
-            toastr.warning(t`A number lower than the entry count has been chosen. All entries below that will default to 0.`, t`Apply Current Sorting`);
+        if (isNaN(step) || step < 1) {
+            toastr.error(t`Invalid step value: ${step}`, t`Apply Current Sorting`);
+            return;
+        }
+        if (!ascending && start < entryCount) {
+            toastr.warning(t`A starting value lower than the entry count has been chosen. All entries below that will default to 0.`, t`Apply Current Sorting`);
         }
 
         // We need to sort the entries here, as the data source isn't sorted
         const entries = Object.values(data.entries);
         sortWorldInfoEntries(entries);
 
-        let updated = 0, current = start;
-        for (const entry of entries) {
-            const newOrder = Math.max(current--, 0);
-            if (entry.order === newOrder) continue;
+        let updated = 0;
+        entries.forEach((entry, index) => {
+            const newOrder = ascending
+                ? start + index * step
+                : Math.max(start - index * step, 0);
+            if (entry.order === newOrder) return;
 
             entry.order = newOrder;
-            setWIOriginalDataValue(data, entry.order, 'order', entry.order);
+            setWIOriginalDataValue(data, entry.uid, 'order', entry.order);
             updated++;
-        }
+        });
 
         if (updated > 0) {
-            toastr.info(`Updated ${updated} Order values`, 'Apply Custom Sorting');
+            toastr.info(t`Updated ${updated} Order values`, t`Apply Current Sorting`);
             await saveWorldInfo(name, data, true);
             updateEditor(navigation_option.previous);
         } else {
-            toastr.info('All values up to date', 'Apply Custom Sorting');
+            toastr.info(t`All values up to date`, t`Apply Current Sorting`);
         }
     });
 
@@ -8187,11 +8311,12 @@ async function renameWorldInfo(name, data) {
     }
 
     const entryPreviouslySelected = selected_world_info.findIndex((e) => e === oldName);
+    const retargetPersonaLore = power_user.persona_description_lorebook === oldName;
 
     await saveWorldInfo(newName, data, true);
     await deleteWorldInfo(oldName);
 
-    await updateWorldInfoLinks(oldName, newName);
+    await updateWorldInfoLinks(oldName, newName, { retargetPersonaLore });
 
     if (Array.isArray(world_info.pinnedWorlds)) {
         world_info.pinnedWorlds = world_info.pinnedWorlds.map((entry) => areLookupNamesEqual(entry, oldName) ? newName : entry);
@@ -8214,9 +8339,10 @@ async function renameWorldInfo(name, data) {
  * Retargets all character lore links from an old world info name to a new one, with an optional confirmation for primary lorebook links
  * @param {string} oldName Previous WI file name
  * @param {string} newName New WI file name
+ * @param {{ retargetPersonaLore?: boolean }} [options] Additional relink options
  * @returns {Promise<void>}
  */
-async function updateWorldInfoLinks(oldName, newName) {
+async function updateWorldInfoLinks(oldName, newName, { retargetPersonaLore } = {}) {
     const existingCharLores = world_info.charLore?.filter((e) => e.extraBooks.includes(oldName));
     if (existingCharLores && existingCharLores.length > 0) {
         existingCharLores.forEach((charLore) => {
@@ -8225,6 +8351,36 @@ async function updateWorldInfoLinks(oldName, newName) {
             charLore.extraBooks = tempCharLore;
         });
         saveSettingsDebounced();
+    }
+
+    // Update link for active persona
+    if (retargetPersonaLore) {
+        power_user.persona_description_lorebook = newName;
+        const object = getOrCreatePersonaDescriptor();
+        object.lorebook = newName;
+        setPersonaDescription();
+        saveSettingsDebounced();
+    }
+
+    // Update links for other personas
+    Object.keys(power_user.personas).forEach((persona) => {
+        if (user_avatar === persona) {
+            return;
+        }
+        const descriptor = power_user.persona_descriptions[persona];
+        if (!descriptor) {
+            return;
+        }
+        if (descriptor.lorebook === oldName) {
+            descriptor.lorebook = newName;
+            saveSettingsDebounced();
+        }
+    });
+
+    // update the world info key to the new name if it's still set to the old one
+    if (chat_metadata[METADATA_KEY] === oldName) {
+        chat_metadata[METADATA_KEY] = newName;
+        await saveMetadata();
     }
 
     // find all characters using the old lorebook name as their primary world
@@ -9257,12 +9413,19 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
         console.debug(`[WI] Search done. Found ${activatedNow.size} possible entries.`);
 
         // Sort the entries for the probability and the budget limit checks
-        const newEntries = [...activatedNow]
-            .sort((a, b) => {
-                const isASticky = timedEffects.isEffectActive('sticky', a) ? 1 : 0;
-                const isBSticky = timedEffects.isEffectActive('sticky', b) ? 1 : 0;
-                return isBSticky - isASticky || sortedEntries.indexOf(a) - sortedEntries.indexOf(b);
-            });
+        let newEntries;
+        if (activatedNow.size > 1) {
+            const sortedEntriesIndex = new Map(sortedEntries.map((entry, index) => [entry, index]));
+            newEntries = [...activatedNow]
+                .sort((a, b) => {
+                    const isASticky = timedEffects.isEffectActive('sticky', a) ? 1 : 0;
+                    const isBSticky = timedEffects.isEffectActive('sticky', b) ? 1 : 0;
+                    return isBSticky - isASticky
+                        || (sortedEntriesIndex.get(a) ?? -1) - (sortedEntriesIndex.get(b) ?? -1);
+                });
+        } else {
+            newEntries = [...activatedNow];
+        }
 
 
         let newContent = '';
@@ -10528,7 +10691,7 @@ export async function importWorldInfo(file) {
  * Forces the world info editor to open on a specific world.
  * @param {string} worldName The name of the world to open
  */
-export function openWorldInfoEditor(worldName) {
+export async function openWorldInfoEditor(worldName) {
     console.log(`Opening lorebook for ${worldName}`);
     const worldInfo = $('#WorldInfo');
     const selectWorld = () => {
@@ -10547,7 +10710,7 @@ export function openWorldInfoEditor(worldName) {
     // event handlers. Wait for the drawer to have a real layout before
     // rendering entries, otherwise autoSetHeight textareas measure at 0px
     // and long entry titles keep the same height as short ones.
-    void waitUntilCondition(() => {
+    await waitUntilCondition(() => {
         const element = worldInfo[0];
         if (!(element instanceof HTMLElement) || !element.classList.contains('openDrawer')) {
             return false;
@@ -10555,9 +10718,9 @@ export function openWorldInfoEditor(worldName) {
 
         const rect = element.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
-    }, 1000, 16, { rejectOnTimeout: false })
-        .then(() => new Promise((resolve) => requestAnimationFrame(resolve)))
-        .then(selectWorld);
+    }, 1000, 16, { rejectOnTimeout: false });
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    selectWorld();
 }
 
 /**

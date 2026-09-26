@@ -667,7 +667,13 @@ export class ToolManager {
             }
 
             if (typeof deltaValue === 'string') {
-                if (typeof targetValue === 'string') {
+                // `id`, `name`, `type` are sent in full by some providers on every
+                // streaming chunk; concatenating them would duplicate the value.
+                if (key === 'id' || key === 'name' || key === 'type') {
+                    if (!targetValue) {
+                        target[key] = deltaValue;
+                    }
+                } else if (typeof targetValue === 'string') {
                     // Concatenate strings
                     target[key] = targetValue + deltaValue;
                 } else {
@@ -700,10 +706,30 @@ export class ToolManager {
             return false;
         }
 
-        // SINGLE post-processing flattens all roles into a single user message, which destroys tool-call chains
+        // GPT-6 Astra supports tool calling only through the Responses API.
+        if ([chat_completion_sources.OPENAI, chat_completion_sources.AZURE_OPENAI].includes(settings.chat_completion_source)
+            && /^gpt-6-astra/.test(model)) {
+            return false;
+        }
+
+        // SINGLE post-processing flattens all roles into a single user message, which destroys tool-call chains.
+        // The collapse of the *_TOOLS variants (commit 5d764c423) renamed the enum values, but third-party
+        // scripts following the upstream ST vocabulary (which still has merge_tools/semi_tools/strict_tools)
+        // can write the legacy strings into the live settings at runtime — outside the reach of the
+        // persisted-preset migration in migrateChatCompletionSettings. Normalize those aliases here so the
+        // tools array still reaches the request; the server-side postProcessPrompt has matching fall-through
+        // cases (src/prompt-converters.js) with tools:true, so the shapes are equivalent.
         const { NONE, MERGE, SEMI, STRICT } = custom_prompt_post_processing_types;
+        const legacyPostProcessingAliases = {
+            merge_tools: MERGE,
+            semi_tools: SEMI,
+            strict_tools: STRICT,
+            claude: MERGE,
+        };
+        const postProcessing = legacyPostProcessingAliases[settings.custom_prompt_post_processing]
+            ?? settings.custom_prompt_post_processing;
         const allowedPromptPostProcessing = [NONE, MERGE, SEMI, STRICT];
-        if (!allowedPromptPostProcessing.includes(settings.custom_prompt_post_processing)) {
+        if (!allowedPromptPostProcessing.includes(postProcessing)) {
             return false;
         }
 

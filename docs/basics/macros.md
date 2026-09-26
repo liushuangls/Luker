@@ -289,6 +289,39 @@ This pairs naturally with <span v-pre>`{{each}}`</span>: an NPC roster, an inven
 {{/each}}
 ```
 
+### Single-key access — <span v-pre>`{{getvarkey}}`</span> / <span v-pre>`{{setvarkey}}`</span>
+
+::: tip Implementation provenance
+The key-addressed family below comes from stock SillyTavern. The [dotted paths](#dotted-paths-for-structured-values) are a Luker extension that reaches arbitrary depth in a single macro. Both forms are available for compatibility with content written for stock SillyTavern.
+:::
+
+SillyTavern's key-addressed family is available as-is:
+
+| Macro | Alias | Scope |
+|---|---|---|
+| <span v-pre>`{{getvarkey::name::key}}`</span> | `getvarindex` | Local |
+| <span v-pre>`{{setvarkey::name::key::value}}`</span> | `setvarindex` | Local |
+| <span v-pre>`{{getglobalvarkey::name::key}}`</span> | `getglobalvarindex` | Global |
+| <span v-pre>`{{setglobalvarkey::name::key::value}}`</span> | `setglobalvarindex` | Global |
+
+These read or write **one** key (or array index) of a JSON-stringified variable. A numeric-looking key creates an array, anything else an object:
+
+```text
+{{setvarkey::roster::alice::40}}[{{getvarkey::roster::alice}}]  → [40]
+{{setvarkey::log::0::first}}{{setvarkey::log::1::second}}        → numeric keys, so `log` is an array
+[{{getvarkey::log::1}}]                                          → [second]
+```
+
+Prefer the [dotted paths](#dotted-paths-for-structured-values) above for new content: they reach any depth in one macro and write through the same syntax. The `varkey` form addresses a single level only, so reaching `roster.alice.hp` takes a read-modify-write you have to spell out yourself.
+
+The one thing it does that dotted paths cannot: the key is taken **verbatim**, so it is the way to address a key that itself contains a dot.
+
+```text
+{{setvarkey::metrics::p95.latency::120}}   → sets the literal key "p95.latency"
+{{getvarkey::metrics::p95.latency}}        → 120
+{{getvar::metrics.p95.latency}}            → empty: the dotted form splits at each dot
+```
+
 ### Per-message (floor) variables {#per-message-variables}
 
 In stock SillyTavern, side-effect macros like <span v-pre>`{{setvar::hp::50}}`</span> only run when they appear in a *prompt template* — preset, world info, or the very first message. When the AI writes the same literal in its reply, it does nothing and shows up verbatim in the chat.
@@ -500,28 +533,33 @@ On non-scoped macros the flag is accepted but has no behavioral effect.
 | `!` | Resolve before other macros in the same text | Parsed only |
 | `?` | Resolve after other macros | Parsed only |
 | `~` | Mark for re-evaluation | Parsed only |
-| `>` | Treat `\|` as an output-filter pipe | Parsed only (see *Pipe* below) |
+| `>` | Treat `\|` as an output-filter pipe | No effect (see *Pipe* below) |
 
 These tokens are recognized by the parser today but no runtime hook consumes them, so they have no effect on output. The lone `!` in <code v-pre>{{if !.dead}}</code> is a separate construct — it's *condition negation* inside <code v-pre>{{if}}</code>, not the flag.
 
 Flags can be combined and whitespace between flag and name is allowed: <code v-pre>{{ #each ::list}} … {{/each}}</code>.
 
-### `|` — pipe (argument terminator)
+### `|` — pipe (ordinary character)
 
-The pipe character is special inside macro arguments **even without the `>` flag**. The lexer transitions out of argument mode when it sees `\|`, so:
+::: tip Why this differs from SillyTavern
+Stock SillyTavern parses a pipe as an argument terminator and supports output filters such as <code v-pre>{{macro|uppercase}}</code>. That implementation is temporarily disabled upstream (issue #5618), and Luker follows the upstream lexer, so the behavior described here matches upstream.
+:::
 
-```text
-{{getvar::name|filter}}
-```
-
-…parses as the macro `getvar` with the single argument `name` followed by a "filter" identifier `filter`. The filter handler isn't wired up yet, so the filter name is discarded and the macro behaves as <code v-pre>{{getvar::name}}</code>. The practical implication is that **a literal `\|` inside an argument terminates that argument** — to keep `\|` as part of the value, escape it as `\|`:
+The pipe has no special meaning inside macro arguments. The lexer does not treat `|` as an argument terminator, so the character is ordinary content and reaches the macro verbatim:
 
 ```text
-{{setvar::menu::sword \| shield \| bow}}
+{{setvar::menu::sword | shield | bow}}   → stores "sword | shield | bow"
+{{getvar::name|filter}}                  → reads the variable `name|filter`
 ```
 
-::: warning Pipe is reserved
-Today, writing <code v-pre>{{macro\|uppercase}}</code> does **not** uppercase anything — it just parses without error, drops the filter name, and runs the macro on the args before the pipe. If you need string transforms, register a custom macro or use a regex extension. The pipe-filter chain itself is reserved for a future engine version.
+There is no escape for the pipe; a backslash is stored literally:
+
+```text
+{{setvar::k::a \| b}}   → stores "a \| b"
+```
+
+::: warning Output modifiers are unavailable
+<code v-pre>{{macro|uppercase}}</code> does not uppercase anything. If you need string transforms, register a custom macro or use a regex extension.
 :::
 
 ## Slash command pipes — <code v-pre>{{pipe}}</code>, <code v-pre>{{var::name}}</code>
@@ -535,7 +573,7 @@ Inside a **slash command closure** (STscript — `/command1 | /command2 | …` c
 
 Both only exist inside the slash command parser. Outside an STscript context they render literally (no closure to bind them to).
 
-The `\|` character is also the slash command pipe operator at the STscript level — that's a feature of the command parser, not the macro engine. Inside a single macro's args, `\|` follows the *macro* pipe rule described above.
+The `|` character is also the slash command pipe operator at the STscript level — that's a feature of the command parser, not the macro engine. Inside a single macro's args, `|` follows the *macro* pipe rule described above.
 
 ## Resolution semantics
 
