@@ -1,6 +1,6 @@
 # Character Card Basics
 
-Character cards are one of the most fundamental concepts in Luker. A character card defines everything about an AI character — from name and appearance to personality, speech patterns, and even the world they inhabit. Each time you chat with the AI, the information in the character card is sent to the AI model, guiding it to roleplay as that character.
+Character cards are one of the most fundamental concepts in Luker. A character card defines everything about an AI character — from name and appearance to personality, speech patterns, and even the world they inhabit. When you chat with the AI, the information in the character card is sent to the AI model, guiding it to roleplay as that character.
 
 ## What is a Character Card
 
@@ -74,6 +74,12 @@ When exporting, you can choose PNG or JSON format. PNG format embeds the charact
 Exported character cards include all core field data. If the character card has bound Luker extension data (such as bound presets, orchestration configs), that data is exported as well.
 :::
 
+### Replacing a Character Card
+
+Use **Replace / Update** in the character management menu to swap a card for a newer version while keeping chats, assets, and group memberships. Card content comes from the new file, but local bindings — bound chat completion presets, dedicated personas, orchestration config, Memory Graph schema, and CardApp enablement — are kept from the replaced card. When the new card ships its own version of a binding, Luker asks which one to keep.
+
+After the card is replaced, if a world-book decision is available, a dialog asks what to do: choose **Import new book** to save the new card's embedded world book as a standalone file and bind it, or **Keep old book** to re-bind the previously bound book. If the Character Editor Assistant is enabled, a third choice — **Merge in editor** — opens an AI-assisted diff between the previous and the new book.
+
 ## Luker's Character Card Extensions
 
 Building on the standard V2 format, Luker adds several practical extensions to character cards. This extension data is stored in the `data.extensions.luker` field and doesn't affect compatibility with other tools.
@@ -88,7 +94,7 @@ See [Preset System](/basics/presets) and [Card-Bound Presets and Personas](/impr
 
 ### Orchestration Config
 
-Character cards can carry dedicated multi-agent orchestration configurations. The orchestrator runs multiple AI agents for plot analysis and planning before each response generation, producing orchestration guidance that's injected into the creative AI's context.
+Character cards can carry dedicated multi-agent orchestration configurations. The orchestrator runs multiple AI agents for plot analysis and planning before response generation, producing orchestration guidance that's injected into the creative AI's context.
 
 Card creators can design custom orchestration workflows for specific characters and export them along with the character card. Users can use these orchestration configs immediately after importing the card.
 

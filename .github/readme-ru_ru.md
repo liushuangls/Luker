@@ -1,103 +1,179 @@
-> [!IMPORTANT]  
-> Приведенная здесь информация может быть устаревшей или неполной и предоставляется только для вашего удобства. Пожалуйста, используйте английскую версию для получения наиболее актуальной информации.
-
 <a name="readme-top"></a>
 
-![][cover]
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/funnycups/Luker/release/docs/public/images/branding/hero-dark.png">
+  <img alt="Luker — платформа для ролевого общения нового поколения" src="https://raw.githubusercontent.com/funnycups/Luker/release/docs/public/images/branding/hero-light.png">
+</picture>
 
 <div align="center">
 
-[English](readme.md) | [German](readme-de_de.md) | [中文](readme-zh_cn.md) | [繁體中文](readme-zh_tw.md) | [日本語](readme-ja_jp.md) | Русский | [한국어](readme-ko_kr.md)
+[English](readme.md) | [Deutsch](readme-de_de.md) | [简体中文](readme-zh_cn.md) | [繁體中文](readme-zh_tw.md) | [日本語](readme-ja_jp.md) | **Русский** | [한국어](readme-ko_kr.md)
 
-[![GitHub Stars](https://img.shields.io/github/stars/SillyTavern/SillyTavern.svg)](https://github.com/SillyTavern/SillyTavern/stargazers)
-[![GitHub Forks](https://img.shields.io/github/forks/SillyTavern/SillyTavern.svg)](https://github.com/SillyTavern/SillyTavern/forks)
-[![GitHub Issues](https://img.shields.io/github/issues/SillyTavern/SillyTavern.svg)](https://github.com/SillyTavern/SillyTavern/issues)
-[![GitHub Pull Requests](https://img.shields.io/github/issues-pr/SillyTavern/SillyTavern.svg)](https://github.com/SillyTavern/SillyTavern/pulls)
+[![GitHub Stars](https://img.shields.io/github/stars/funnycups/Luker.svg?style=flat)](https://github.com/funnycups/Luker/stargazers)
+[![GitHub Forks](https://img.shields.io/github/forks/funnycups/Luker.svg?style=flat)](https://github.com/funnycups/Luker/forks)
+[![GitHub Issues](https://img.shields.io/github/issues/funnycups/Luker.svg?style=flat)](https://github.com/funnycups/Luker/issues)
+[![License](https://img.shields.io/github/license/funnycups/Luker.svg?style=flat)](../LICENSE)
+[![Docs](https://img.shields.io/badge/docs-luker.cups.moe-orange?style=flat)](https://luker.cups.moe)
+[![Android APK](https://img.shields.io/badge/download-Android%20APK-3ddc84?style=flat&logo=android&logoColor=white)](https://github.com/funnycups/Luker/releases)
 
 </div>
 
 ---
 
-## Что добавляет Luker
+Luker — платформа для ролевого общения нового поколения.
 
-Luker — это форк SillyTavern с упором на более аккуратный API-дизайн и расширяемость.
+- Детали раннего сюжета точно цитируются, когда это уместно
+- Несколько агентов исследуют контекст и пишут текст сообщения
+- Карточки редактируются в диалоге с ИИ, правки подтверждаются по одной
+- Поиск фанатских материалов и лора первоисточника прямо во время ролевой игры
 
-- Инкрементальные API сохранения чатов (`append` / `patch` / `meta/patch` / `state/patch`).
-- Восстановление генерации на стороне бэкенда при переподключении клиента.
-- Встроенные плагины: `Orchestrator` и `Memory`.
-- Документ по миграции API: [docs/luker-api-migration.md](https://github.com/funnycups/Luker/blob/release/docs/luker-api-migration.md)
+## Что такое Luker
 
-SillyTavern предоставляет единый интерфейс для многих LLM API (KoboldAI/CPP, Horde, NovelAI, Ooba, Tabby, OpenAI, OpenRouter, Claude, Mistral и других), мобайл-френдли макет, режим визуальной новеллы, интеграцию с генерацией изображений через API Automatic1111 и ComfyUI, TTS, WorldInfo (лорбуки), кастомизируемый UI, автоперевод, тончайшую настройку промптов, и возможность устанавливать расширения.
+Luker — это среда, созданная специально для ролевой игры с большими языковыми моделями. В комплекте — долговременная память на основе графа, мультиагентный планировщик сцен с библиотекой переиспользуемых навыков, студия карточек персонажей с ИИ-ассистентом, помощник по пресетам, нативная синхронизация по локальной сети и настоящее Android-приложение, которое запускает весь бэкенд прямо на телефоне — всё это в одной установке, без сторонних расширений.
 
-Чтобы помочь вам быстрее разобраться в SillyTavern, мы создали [сайт с документацией](https://docs.sillytavern.app/). Ответы на большинство вопросов можно найти там.
+Luker построен на базе [SillyTavern](https://github.com/SillyTavern/SillyTavern) и сохраняет с ним **100% совместимость данных**. Карточки персонажей, информация о мире, пресеты и чаты переносятся в обе стороны без каких-либо затрат на миграцию.
 
-## Что такое SillyTavern?
+## Ключевые возможности
 
-SillyTavern (или сокращенно ST) - это локально устанавливаемый пользовательский интерфейс, который позволяет вам взаимодействовать с LLM для генерации текста, движками для генерации изображений и моделями голоса TTS.
+### Memory Graph — персонажи действительно помнят
 
-Начавшись в феврале 2023 года как форк TavernAI 1.2.8, SillyTavern теперь насчитывает более 200 контрибьюторов и 2 года независимой разработки, и продолжает служить ведущим программным обеспечением для опытных энтузиастов ИИ.
+Долговременная память на основе графа знаний. Содержимое чата превращается в типизированные узлы (персонажи, локации, события, сюжетные линии), связанные между собой. Перед ответом проход припоминания идёт по графу и подставляет в контекст самые релевантные воспоминания — когда главный герой возвращается в место, где уже бывал, всплывает ранний персонаж, давно не появлявшийся в кадре.
 
-## Наше видение
+![Демонстрация Memory Graph](https://raw.githubusercontent.com/funnycups/Luker/release/docs/public/images/branding/memory-graph-demo.gif)
 
-1. Мы стремимся предоставить пользователям как можно больше полезности и контроля над их промптами LLM. Крутая кривая обучения - это часть веселья!
-2. Мы не предоставляем никаких онлайн или хостинговых услуг, а также программно не отслеживаем данные пользователей.
-3. SillyTavern - это проект, созданный преданным сообществом энтузиастов LLM, и он всегда будет бесплатным и с открытым исходным кодом.
+→ [Документация Memory Graph](https://luker.cups.moe/features/memory-graph)
 
-## Нужен ли мне мощный компьютер для запуска SillyTavern?
+### Мультиагентный оркестратор — несколько агентов исследуют контекст и пишут текст сообщения
 
-Требования к оборудованию минимальны: он будет работать на всем, что может запустить NodeJS 20 или выше. Если вы собираетесь выполнять инференс LLM на своем локальном компьютере, мы рекомендуем видеокарту NVIDIA 3000-й серии с не менее чем 6 ГБ видеопамяти, но фактические требования могут варьироваться в зависимости от модели и используемого вами бэкенда.
+Сначала запускается настраиваемая команда агентов и передаёт работу LLM-писателю: distiller сжимает недавний контекст, planner набрасывает следующую сцену, critic проверяет результат. Готовый ответ приходит вместе с трассировкой выполнения, которую можно изучить. Выберите режим исполнения — Spec (фиксированный конвейер), Single Agent, Agenda (поток распределяет задачи между агентами по мере выполнения), Loop (один агент итеративно выполняет вызовы инструментов до завершения задачи) или Director (главный агент вместе с командой суб-агентов исследует контекст и пишет текст сообщения).
 
-## Вопросы или предложения?
+![Демонстрация мультиагентного оркестратора](https://raw.githubusercontent.com/funnycups/Luker/release/docs/public/images/branding/orchestrator-demo.gif)
 
-### Сервер в Discord
+→ [Документация мультиагентного оркестратора](https://luker.cups.moe/features/orchestrator/)
 
-| [![][discord-shield-badge]][discord-link] | [Вступайте в наше Discord-сообщество!](https://discord.gg/sillytavern) Получайте поддержку, делитесь любимыми персонажами и промптами. |
-| :---------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------- |
+### Skills — переиспользуемые наборы знаний по мере необходимости
 
-Или свяжитесь с разработчиками напрямую:
+Переиспользуемые наборы знаний, которые агент читает по мере необходимости: правила письма, речевые конвенции, чек-листы против штампов. Формат совместим с Anthropic Claude Skills. Профиль Director, используемый оркестратором по умолчанию, поставляется со встроенными навыками, а ещё навыки можно передавать вместе с карточкой персонажа или пресетом.
 
-* Discord: cohee, rossascends, wolfsblvt
-* Reddit: [/u/RossAscends](https://www.reddit.com/user/RossAscends/), [/u/sillylossy](https://www.reddit.com/user/sillylossy/), [u/Wolfsblvt](https://www.reddit.com/user/Wolfsblvt/)
-* [Опубликовать issue на GitHub](https://github.com/SillyTavern/SillyTavern/issues)
+<img alt="Менеджер навыков с установленными и встроенными навыками" src="https://raw.githubusercontent.com/funnycups/Luker/release/docs/public/_screenshots/skills/manager-installed-tab.png" width="720">
 
-### Мне нравится ваш проект! Как я могу внести свой вклад?
+→ [Документация Skills](https://luker.cups.moe/features/skills/)
 
-1. Отправляйте пулл-реквесты. Узнайте, как внести свой вклад: [CONTRIBUTING.md](../CONTRIBUTING.md)
-2. Отправляйте предложения по функциям и отчеты о проблемах, используя предоставленные шаблоны.
-3. Прочтите весь этот файл readme и сайт документации, чтобы избежать отправки дублирующихся проблем.
+### CardApp Studio и ИИ-редактор карточек — редактируйте карточки, разговаривая с ИИ
+
+Полноценная IDE для карточек персонажей: редактор CodeMirror-6, панель чата с ИИ и подтверждение правок в виде diff, по одной. Обычным карточкам достаётся редактор во всплывающем окне; карточки со встроенным **CardApp** — мини-приложением, живущим внутри карточки, — открываются в полноценной Studio с деревом файлов, живым предпросмотром и историей.
+
+![Демонстрация CardApp Studio](https://raw.githubusercontent.com/funnycups/Luker/release/docs/public/images/branding/cardapp-studio-demo.gif)
+
+→ [Помощник редактора карточек](https://luker.cups.moe/features/card-editor/) · [CardApp Studio](https://luker.cups.moe/features/card-editor/studio)
+
+### Preset Assistant — создание пресета по описанию
+
+Расскажите помощнику, что должен делать ваш пресет чат-комплита. Он дорабатывает пресет вместе с вами, показывая правки в виде diff, пока результат вас не устроит: читает параметры, правит записи промптов и сравнивает с эталонным пресетом. Тот же подход работает и с пресетами оркестратора.
+
+<img alt="Preset Assistant" src="https://raw.githubusercontent.com/funnycups/Luker/release/docs/public/images/preset-assistant/cpa-overview.png" width="720">
+
+→ [Документация Preset Assistant](https://luker.cups.moe/features/preset-assistant)
+
+### Нативное приложение для Android — вся платформа в вашем телефоне
+
+Бэкенд Luker работает *внутри* приложения для Android. Установите APK, откройте его — и получите полноценный сервер вместе с интерфейсом на одном устройстве: без Termux, без ручной установки Node, без проброса портов. Импорт резервной копии в формате ZIP прямо на экране первого запуска делает переезд безболезненным.
+
+![Демонстрация Android APK](https://raw.githubusercontent.com/funnycups/Luker/release/docs/public/images/branding/android-apk-demo.gif)
+
+→ [Руководство по приложению для Android](https://luker.cups.moe/guide/android)
+
+### Поисковые инструменты — персонажи умеют искать в сети
+
+Дайте LLM-писателю инструмент живого веб-поиска (DuckDuckGo, SearXNG, Brave) или запустите поискового агента перед генерацией, который запишет результаты в информацию о мире ещё до начала ответа. В основе — настоящие поисковые системы, а не просто попытка вспомнить что-то из обучающих данных.
+
+→ [Документация по поисковым инструментам](https://luker.cups.moe/features/search-tools)
+
+### LAN Sync
+
+Свяжите два экземпляра Luker в одной сети. Чаты, карточки, информация о мире и настройки синхронизируются между ними, так что компьютер и телефон остаются синхронными, а в облако ничего отправлять не нужно.
+
+→ [Руководство по LAN Sync](https://luker.cups.moe/improvements/lan-sync)
+
+### Объединение и разделение чатов
+
+Разделите длинный чат в любой реплике или объедините чаты — история ветвлений остаётся согласованной. Пригодится, когда сцена вышла из-под контроля и хочется ответвить интересные фрагменты, не потеряв всё остальное.
+
+<img alt="Объединение и разделение чатов" src="https://raw.githubusercontent.com/funnycups/Luker/release/docs/public/screenshots/chat-merge-split/07-split-dialog-three-segments.png" width="720">
+
+→ [Управление чатами](https://luker.cups.moe/basics/chat-management)
+
+### Атрибуция реплик NPC в TTS
+
+Когда TTS включён, реплики в кавычках могут звучать голосом своего персонажа. Фоновый проход определяет, кому принадлежит реплика: обнаруженные NPC автоматически попадают в карту голосов, а имена, добавленные заранее, распознаются уже при первом воспроизведении.
+
+<img alt="Кнопки воспроизведения у реплик в сообщении чата" src="https://raw.githubusercontent.com/funnycups/Luker/release/docs/public/screenshots/tts-npc-attribution/03-inline-buttons-zoom.png" width="678">
+
+→ [Атрибуция реплик NPC в TTS](https://luker.cups.moe/features/tts-npc-attribution)
+
+### Меняйте модель, сохраняя настройку промптов
+
+В SillyTavern API-подключения и пресеты чат-комплита связаны между собой, поэтому переключение на другую модель тянет за собой всю вашу конфигурацию промптов. Luker развязывает эти две вещи: меняйте модель, не пересобирая промпты, и меняйте пресет, не трогая API-ключи.
+
+### Закройте вкладку — ответ продолжит писаться
+
+Генерация выполняется на бэкенде и стримится в интерфейс по WebSocket. Перезагрузите вкладку, закройте крышку ноутбука, потеряйте Wi-Fi — ответ продолжит писаться на сервере и подключится к вашему интерфейсу, как только вы вернётесь. Ничего не теряется, ничего не приходится перезапускать.
+
+→ [Хранение на бэкенде и жизненный цикл](https://luker.cups.moe/improvements/backend-storage)
+
+---
+
+Завершает картину длинный хвост мелких удобств — группировка пресетов и промптов, блокировка персоны в чате, уведомления с отменой, трассировка того, какие записи Информации о мире сработали и почему, списки моделей, подгружаемые в реальном времени от каждого провайдера. Всё это описано в [документации](https://luker.cups.moe).
 
 ## Скриншоты
 
-<img width="500" alt="image" src="https://github.com/user-attachments/assets/9b5f32f0-c3b3-4102-b3f5-0e9213c0f50f">
-<img width="500" alt="image" src="https://github.com/user-attachments/assets/913fdbaa-7d33-42f1-ae2c-89dca41c53d1">
+<table>
+  <tr>
+    <td width="50%"><img alt="Инспектор Memory Graph" src="https://raw.githubusercontent.com/funnycups/Luker/release/docs/public/images/memory-graph/memory-graph-view.png"></td>
+    <td width="50%"><img alt="Трассировка выполнения оркестратора" src="https://raw.githubusercontent.com/funnycups/Luker/release/docs/public/images/orchestrator/orch-runtime-trace.png"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img alt="Рабочее пространство CardApp Studio" src="https://raw.githubusercontent.com/funnycups/Luker/release/docs/public/images/cardapp-studio/studio-overview.png"></td>
+    <td width="50%"><img alt="Preset Assistant" src="https://raw.githubusercontent.com/funnycups/Luker/release/docs/public/images/preset-assistant/cpa-overview.png"></td>
+  </tr>
+</table>
 
-## Установка
+## Начало работы
 
-Для получения подробных инструкций по установке, пожалуйста, посетите нашу документацию:
+- **Десктоп (Node.js)** — `git clone https://github.com/funnycups/Luker.git && cd Luker && npm install && node server.js`. Требуется Node.js 24 или новее. → [Начало работы](https://luker.cups.moe/guide/getting-started)
+- **Android APK** — скачайте последний подписанный APK со страницы [Releases](https://github.com/funnycups/Luker/releases) и установите. → [Руководство по приложению для Android](https://luker.cups.moe/guide/android)
+- **Docker** — `docker compose up` с использованием compose-файла в корне репозитория. → [Начало работы](https://luker.cups.moe/guide/getting-started)
 
-* **[Руководство по установке для Windows](https://docs.sillytavern.app/installation/windows/)**
-* **[Руководство по установке для MacOS/Linux](https://docs.sillytavern.app/installation/linuxmacos/)**
-* **[Руководство по установке для Android (Termux)](https://docs.sillytavern.app/installation/android-(termux)/)**
-* **[Руководство по установке Docker](https://docs.sillytavern.app/installation/docker/)**
+## Переходите из SillyTavern?
+
+Luker на 100% совместим с SillyTavern по данным в обе стороны. Скопируйте папку `data/` — и готово: карточки, информация о мире, пресеты, чаты, персоны, настройки. Глобальные сторонние расширения хранятся вне `data/`, в `public/scripts/extensions/third-party/`, поэтому скопируйте их отдельно. Если решите вернуться, скопируйте её в обратную сторону; эксклюзивные данные Luker (графы памяти, конфигурации оркестратора) лежат в отдельных файлах состояния, которые SillyTavern игнорирует. **Впрочем, перед миграцией всё равно сделайте резервную копию.**
+
+→ [Руководство по миграции](https://luker.cups.moe/guide/migration)
+
+## Сообщество и обратная связь
+
+- Отчёты об ошибках и предложения по функциям: [GitHub Issues](https://github.com/funnycups/Luker/issues)
+- Перед созданием issue прочитайте документацию: [luker.cups.moe](https://luker.cups.moe)
+
+## Участие в разработке
+
+Pull request'ы приветствуются. См. [CONTRIBUTING.md](../CONTRIBUTING.md) и, пожалуйста, поищите среди существующих issue, прежде чем открывать новое.
 
 ## Лицензия и благодарности
 
-**Эта программа распространяется в надежде, что она будет полезна, но БЕЗ КАКИХ-ЛИБО ГАРАНТИЙ; даже без подразумеваемой гарантии ТОВАРНОЙ ПРИГОДНОСТИ или ПРИГОДНОСТИ ДЛЯ ОПРЕДЕЛЕННОЙ ЦЕЛИ. Смотрите GNU Affero General Public License для получения более подробной информации.**
+Лицензия — **AGPL-3.0**. Программа распространяется в надежде, что окажется полезной, но БЕЗ КАКИХ-ЛИБО ГАРАНТИЙ; подробности — в [GNU Affero General Public License](../LICENSE).
 
-* [TavernAI](https://github.com/TavernAI/TavernAI) 1.2.8 от Humi: лицензия MIT
-* Части мода CncAnon TavernAITurbo используются с разрешения
-* Режим визуальной новеллы вдохновлен работой PepperTaco (<https://github.com/peppertaco/Tavern/>)
-* Шрифт Noto Sans от Google (лицензия OFL)
-* Тема иконок от Font Awesome <https://fontawesome.com> (Иконки: CC BY 4.0, Шрифты: SIL OFL 1.1, Код: лицензия MIT)
-* Стандартный контент от @OtisAlejandro (персонаж Seraphina и лорбук) и @kallmeflocc (фон в честь 10 тысяч пользователей Discord)
-* Руководство по Docker от [@mrguymiah](https://github.com/mrguymiah) и [@Bronya-Rand](https://github.com/Bronya-Rand)
-* Библиотека kokoro-js от [@hexgrad](https://github.com/hexgrad) (лицензия Apache-2.0)
+- В основе — **SillyTavern** от Cohee, RossAscends, Wolfsblvt и ещё более 300 участников: <https://github.com/SillyTavern/SillyTavern>
+- [TavernAI](https://github.com/TavernAI/TavernAI-v1) 1.2.8 от Humi (лицензия MIT)
+- Части мода TavernAITurbo от CncAnon используются с разрешения
+- Режим визуальной новеллы вдохновлён [PepperTaco](https://github.com/peppertaco/Tavern/)
+- Шрифт Noto Sans от Google (лицензия OFL)
+- Лексер и парсер — [Chevrotain](https://github.com/chevrotain/chevrotain) (Apache-2.0)
+- Набор иконок — [Font Awesome](https://fontawesome.com) (иконки CC BY 4.0, шрифты SIL OFL 1.1, код MIT)
+- Контент персонажа по умолчанию от @OtisAlejandro (Seraphina) и @kallmeflocc
+- Руководство по Docker от [@mrguymiah](https://github.com/mrguymiah) и [@Bronya-Rand](https://github.com/Bronya-Rand)
+- Библиотека kokoro-js от [@hexgrad](https://github.com/hexgrad) (Apache-2.0)
 
-## Ведущие контрибьюторы
+## Основные участники
 
-[![Contributors](https://contrib.rocks/image?repo=SillyTavern/SillyTavern)](https://github.com/SillyTavern/SillyTavern/graphs/contributors)
-
-<!-- LINK GROUP -->
-[cover]: https://github.com/user-attachments/assets/01a6ae9a-16aa-45f2-8bff-32b5dc587e44
-[discord-link]: https://discord.gg/sillytavern
-[discord-shield-badge]: https://img.shields.io/discord/1100685673633153084?color=5865F2&label=discord&labelColor=black&logo=discord&logoColor=white&style=for-the-badge
+[![Contributors](https://contrib.rocks/image?repo=funnycups/Luker)](https://github.com/funnycups/Luker/graphs/contributors)

@@ -4,7 +4,7 @@ layout: home
 hero:
   name: Luker
   text: Next-gen Roleplay Chat Platform
-  tagline: A deep rebuild of SillyTavern, featuring knowledge-graph memory, multi-agent orchestration, AI-assisted character creation, and more
+  tagline: Early story details quoted accurately, an agent team that explores the context and drafts the reply, and cards you edit through conversation with an AI
   actions:
     - theme: brand
       text: Quick Start
@@ -16,20 +16,20 @@ hero:
 features:
   - icon: 🧠
     title: Memory Graph
-    details: A knowledge-graph-based long-term memory system that lets characters truly "remember" key information across conversations, building persistent and coherent relationship networks.
+    details: Chat content is distilled into typed nodes — characters, places, events, plotlines — and before a reply a recall pass selects the most relevant ones and injects them into the context. When the protagonist returns to a place they visited earlier, an early character who has long been off-stage is recalled.
   - icon: 🎭
     title: Multi-Agent Orchestrator
-    details: A flexible multi-character collaboration framework supporting autonomous dialogue, scene transitions, and plot progression for immersive group chat experiences.
+    details: A team of agents explores the context and drafts the reply before it is written — distilling context, sketching the scene, reviewing the plan. Execution modes range from a fixed pipeline to a director team.
+  - icon: 🧩
+    title: Skills
+    details: Reusable knowledge packs the agents read on demand, instead of one giant system prompt. Anthropic Claude Skills compatible, and they travel with your cards and presets.
   - icon: ✨
     title: Card Editor Assistant
-    details: An AI-powered character creation tool that intelligently completes character settings and generates example dialogues, dramatically lowering the barrier to high-quality character cards.
+    details: Edit character cards and world info through conversation with an AI. Changes arrive as diffs you approve item by item; cards with a CardApp open in the full Studio.
   - icon: 🔍
     title: Search Tools
-    details: Give characters real-time information retrieval capabilities, seamlessly integrating web search results into conversations for more accurate and timely responses.
-  - icon: 🔧
-    title: Preset Decoupling
-    details: A complete overhaul of the preset architecture, separating prompt templates from API parameters for flexible cross-model, cross-scenario reuse.
-  - icon: ⚡
-    title: Incremental Sync
-    details: An efficient front-to-back data synchronization mechanism that transmits only changes, significantly reducing bandwidth consumption and improving multi-device collaboration.
+    details: Characters can look things up mid-conversation. DuckDuckGo, SearXNG, or Brave — as a tool the model calls when it needs one, or as a pre-request agent that writes findings into world info.
+  - icon: 📱
+    title: Android App
+    details: The entire backend runs inside the app, so a single phone serves both server and UI. Install the APK — no Termux, no manual Node setup, no port forwarding.
 ---

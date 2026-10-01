@@ -157,7 +157,7 @@ export async function crossModeRestore(zipPath, engineMeta, dirs, selection, mod
             onProgress: (event) => {
                 if (!onProgress || !event?.stage) return;
                 try {
-                    onProgress({ phase: 'convert', stage: event.stage, counts: event.counts }); // banned-words-allow
+                    onProgress({ phase: 'convert', stage: event.stage, counts: event.counts });
                 } catch { /* sink errors */ }
             },
         });
@@ -351,7 +351,7 @@ export async function extractFsTreeCategories(zipPath, dirs, selection, opts = {
         if (!force && now - lastProgressAt < 200) return;
         lastProgressAt = now;
         try {
-            onProgress({ phase: 'extract', current, total }); // banned-words-allow
+            onProgress({ phase: 'extract', current, total });
         } catch { /* sink errors */ }
     };
 
@@ -389,6 +389,7 @@ export async function extractFsTreeCategories(zipPath, dirs, selection, opts = {
                     zipfile.openReadStream(entry, async (streamErr, readStream) => {
                         if (streamErr) return finish(streamErr);
                         try {
+                            await fsPromises.chmod(target, 0o644).catch(() => {});
                             await pipeline(readStream, fs.createWriteStream(target, { mode: 0o644 }));
                             restoredCount += 1;
                             reportProgress(restoredCount + failedCount, extractTotal, false);

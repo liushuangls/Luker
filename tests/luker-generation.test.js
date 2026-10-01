@@ -379,6 +379,31 @@ describe('accumulateChunkTextIntoJob', () => {
         accumulateChunkTextIntoJob(job, enc(sse));
         expect(job.text).toBe('hi');
     });
+
+    test('SSE openai_responses: only output_text deltas accumulate, lifecycle events are ignored', () => {
+        const job = makeJob('openai_responses');
+        const sse =
+            `data: ${JSON.stringify({ type: 'response.created', response: { id: 'resp_1' } })}\n\n` +
+            `data: ${JSON.stringify({ type: 'response.reasoning_text.delta', delta: 'thinking...' })}\n\n` +
+            `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'Hel' })}\n\n` +
+            `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'lo' })}\n\n` +
+            `data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed' } })}\n\n`;
+        accumulateChunkTextIntoJob(job, enc(sse));
+        expect(job.text).toBe('Hello');
+    });
+
+    test('non-streaming openai_responses: output[].content output_text parts are joined', () => {
+        const job = makeJob('openai_responses');
+        const payload = JSON.stringify({
+            status: 'completed',
+            output: [
+                { type: 'reasoning', summary: [{ type: 'summary_text', text: 'thinking...' }] },
+                { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Full ' }, { type: 'output_text', text: 'answer.' }] },
+            ],
+        });
+        accumulateChunkTextIntoJob(job, enc(payload));
+        expect(job.text).toBe('Full answer.');
+    });
 });
 
 describe('subscribeToJob', () => {
@@ -492,9 +517,16 @@ describe('getPersistChatKey', () => {
         expect(getPersistChatKey({ kind: 'group' })).toBe('group:');
     });
 
-    test('character-style target produces char:<avatar>:<file_name> raw (no sanitization)', () => {
+    test('character-style target strips a .jsonl suffix to match Repo keys', () => {
         expect(getPersistChatKey({ avatar_url: 'a.png', file_name: 'x.jsonl' }))
-            .toBe('char:a.png:x.jsonl');
+            .toBe('char:a.png:x');
+        expect(getPersistChatKey({ avatar_url: 'a.png', file_name: 'x' }))
+            .toBe('char:a.png:x');
+    });
+
+    test('group target strips a .jsonl suffix to match Repo keys', () => {
+        expect(getPersistChatKey({ kind: 'group', id: 'g1.jsonl' })).toBe('group:g1');
+        expect(getPersistChatKey({ kind: 'group', id: 'g1' })).toBe('group:g1');
     });
 
     test('character-style needs both avatar_url and file_name to yield a key', () => {

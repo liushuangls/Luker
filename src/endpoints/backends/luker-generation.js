@@ -7,6 +7,7 @@ import sanitize from 'sanitize-filename';
 import { CHAT_COMPLETION_SOURCES } from '../../constants.js';
 import { appendMessagesToChatFile } from '../chats.js';
 import { getConfigValue } from '../../util.js';
+import { stripJsonlExt } from '../../storage/name-validation.js';
 
 const generationJobs = new Map();
 const LUKER_GENERATION_JOB_MAX_ITEMS = 128;
@@ -116,6 +117,11 @@ function extractTextFromStreamingPayload(payload, source) {
     const defaultContent = choice?.delta?.content ?? choice?.message?.content ?? choice?.text ?? '';
 
     switch (normalizedSource) {
+        case CHAT_COMPLETION_SOURCES.OPENAI_RESPONSES:
+            if (payload?.type === 'response.output_text.delta' && typeof payload.delta === 'string') {
+                return payload.delta;
+            }
+            return '';
         case CHAT_COMPLETION_SOURCES.CLAUDE:
             return typeof payload?.delta?.text === 'string' ? payload.delta.text : '';
         case CHAT_COMPLETION_SOURCES.MAKERSUITE:
@@ -217,6 +223,19 @@ export function extractTextFromFinalPayload(payload) {
     if (typeof payload.output === 'string') {
         return payload.output;
     }
+    if (Array.isArray(payload?.output)) {
+        const out = [];
+        for (const item of payload.output) {
+            if (item?.type === 'message' && Array.isArray(item.content)) {
+                for (const part of item.content) {
+                    if (part?.type === 'output_text' && typeof part.text === 'string') {
+                        out.push(part.text);
+                    }
+                }
+            }
+        }
+        if (out.length > 0) return out.join('');
+    }
 
     return '';
 }
@@ -263,8 +282,11 @@ export function accumulateChunkTextIntoJob(job, chunkBytes) {
     if (typeof chunkBytes === 'string') {
         text = chunkBytes;
     } else if (chunkBytes instanceof Uint8Array || Buffer.isBuffer(chunkBytes)) {
-        try { text = Buffer.from(chunkBytes).toString('utf8'); }
-        catch { return; }
+        try {
+            text = Buffer.from(chunkBytes).toString('utf8');
+        } catch {
+            return;
+        }
     } else {
         return;
     }
@@ -426,7 +448,7 @@ export function getPersistChatKey(persistTarget) {
     }
 
     if (persistTarget.kind === 'group') {
-        return `group:${String(persistTarget.id || '')}`;
+        return `group:${stripJsonlExt(persistTarget.id)}`;
     }
 
     const avatar = String(persistTarget.avatar_url || '');
@@ -434,7 +456,7 @@ export function getPersistChatKey(persistTarget) {
     if (!avatar || !fileName) {
         return '';
     }
-    return `char:${avatar}:${fileName}`;
+    return `char:${avatar}:${stripJsonlExt(fileName)}`;
 }
 
 export function getTaskByRequestId(requestId, expectedOwner) {
@@ -567,8 +589,11 @@ export function subscribeToJob(jobId, callback, options = {}) {
         if (job && Array.isArray(job.events)) {
             for (const entry of job.events) {
                 if (entry.seq >= fromSeq) {
-                    try { callback({ type: 'event', entry }); }
-                    catch (error) { console.warn('[LukerGeneration] subscriber threw during replay', error); }
+                    try {
+                        callback({ type: 'event', entry });
+                    } catch (error) {
+                        console.warn('[LukerGeneration] subscriber threw during replay', error);
+                    }
                 }
             }
         }

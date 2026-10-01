@@ -128,6 +128,8 @@ import {
 } from './scripts/openai.js';
 
 import { openManageBoundPresetsDialog } from './scripts/character/manage-bound-presets-dialog.js';
+import { handlePostReplaceBindings } from './scripts/character/card-binding-preservation.js';
+import { handlePostReplaceWorldBook } from './scripts/character/post-replace-actions.js';
 
 import {
     generateNovelWithStreaming,
@@ -248,6 +250,7 @@ import { registerPromptManagerMigration } from './scripts/PromptManager.js';
 import { getRegexedString, regex_placement } from './scripts/extensions/regex/engine.js';
 import { getAutoContinueOnTruncated, isTruncatedFinishReason } from './scripts/extensions/connection-manager/auto-continue-truncated.js';
 import { withProfileRetry } from './scripts/extensions/connection-manager/profile-retry.js';
+import { getRequestTimeoutMs } from './scripts/extensions/connection-manager/request-timeout.js';
 import { initLogprobs, saveLogprobsForActiveMessage } from './scripts/logprobs.js';
 import { FILTER_STATES, FILTER_TYPES, FilterHelper, isFilterState } from './scripts/filters.js';
 import { getCfgPrompt, getGuidanceScale, initCfg } from './scripts/cfg-scale.js';
@@ -286,6 +289,7 @@ import { evaluateMacros, getLastMessageId, initMacros } from './scripts/macros.j
 import { initVariableOpLog, extractMessageById, pushFloorVarOp } from './scripts/variable-op-log/index.js';
 import { extractFromText as extractSideEffectMacrosFromText } from './scripts/variable-op-log/extractor.js';
 import { initVarOpsPanelHandler } from './scripts/variable-op-log/panel.js';
+import { fetchMediaDeletionCandidates, deleteMediaFiles, promptMediaDeletion, notifyMediaDeleteResult } from './scripts/media-deletion-dialog.js';
 import { installFrontendLogCapture, setFrontendConsoleDebugLoggingEnabled } from './scripts/frontend-log-manager.js';
 import { initDebugExportButton } from './scripts/debug-export.js';
 import { initAndroidDebugTrail } from './scripts/luker-android-debug-trail.js';
@@ -303,6 +307,7 @@ import { AbortReason } from './scripts/util/AbortReason.js';
 import { initSystemPrompts } from './scripts/sysprompt.js';
 import { registerExtensionSlashCommands as initExtensionSlashCommands } from './scripts/extensions-slashcommands.js';
 import { ToolManager } from './scripts/tool-calling.js';
+import { classifyInvocationSummary, getOpenToolTaskTailStart } from './scripts/tool-invocation-hide.js';
 import { registerSkillEmbedLifecycle } from './scripts/skills/embed-lifecycle.js';
 import { addShowdownPatch } from './scripts/util/showdown-patch.js';
 import { applyBrowserFixes } from './scripts/browser-fixes.js';
@@ -2377,6 +2382,7 @@ export async function selectCharacterById(id, { switchMenu = true } = {}) {
             this_edit_mes_id = undefined;
             selected_button = 'character_edit';
             setCharacterId(id);
+            beginChatTransition();
             chat_metadata = {};
             await getChat();
         }
@@ -2703,41 +2709,53 @@ export function getEntitiesList({ doFilter = false, doSort = true } = {}) {
 }
 
 export async function getOneCharacter(avatarUrl, { preserveChat = false } = {}) {
-    const response = await fetch('/api/characters/get', {
-        method: 'POST',
-        headers: getRequestHeaders(),
-        body: JSON.stringify({
-            avatar_url: avatarUrl,
-        }),
-    });
+    let getData;
+    try {
+        const response = await fetch('/api/characters/get', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                avatar_url: avatarUrl,
+            }),
+        });
 
-    if (response.ok) {
-        const getData = await response.json();
-        getData.name = DOMPurify.sanitize(getData.name);
-        getData.chat = String(getData.chat ?? '');
-
-        const indexOf = characters.findIndex(x => x.avatar === avatarUrl);
-
-        if (indexOf !== -1) {
-            // Preserve any non-empty .chat the client already has for
-            // this character. The server returns '' when the PNG has
-            // no embedded chat field (it deliberately stopped minting
-            // a placeholder timestamp — cf. characters.js
-            // projectRuntimeCharacterFields), but we don't want that
-            // empty string to overwrite a real chat name the client
-            // mint-fallback set in getCharacters (script.js initial
-            // load) or that an active session already wrote.
-            const existingChat = characters[indexOf]?.chat;
-            if (!getData.chat && existingChat) {
-                getData.chat = existingChat;
-            }
-            if (preserveChat && existingChat) {
-                getData.chat = existingChat;
-            }
-            characters[indexOf] = getData;
-        } else {
-            console.warn(`Character ${avatarUrl} not found in the list; skip in-place refresh.`);
+        if (!response.ok) {
+            return;
         }
+
+        getData = await response.json();
+    } catch (error) {
+        // A dropped connection or unreadable body must not abort the caller:
+        // every caller treats this as a best-effort in-place refresh, and a
+        // later full getCharacters() reload heals the slot.
+        console.warn(`Failed to refresh character ${avatarUrl}; keeping current data`, error);
+        return;
+    }
+
+    getData.name = DOMPurify.sanitize(getData.name);
+    getData.chat = String(getData.chat ?? '');
+
+    const indexOf = characters.findIndex(x => x.avatar === avatarUrl);
+
+    if (indexOf !== -1) {
+        // Preserve any non-empty .chat the client already has for
+        // this character. The server returns '' when the PNG has
+        // no embedded chat field (it deliberately stopped minting
+        // a placeholder timestamp — cf. characters.js
+        // projectRuntimeCharacterFields), but we don't want that
+        // empty string to overwrite a real chat name the client
+        // mint-fallback set in getCharacters (script.js initial
+        // load) or that an active session already wrote.
+        const existingChat = characters[indexOf]?.chat;
+        if (!getData.chat && existingChat) {
+            getData.chat = existingChat;
+        }
+        if (preserveChat && existingChat) {
+            getData.chat = existingChat;
+        }
+        characters[indexOf] = getData;
+    } else {
+        console.warn(`Character ${avatarUrl} not found in the list; skip in-place refresh.`);
     }
 }
 
@@ -3169,7 +3187,7 @@ async function refreshVisibleDeletedChatViews(fileName = '') {
     }
 }
 
-async function deleteCharacterChatInternal(characterId, fileName) {
+async function deleteCharacterChatInternal(characterId, fileName, { mediaPrompt = true } = {}) {
     await unshallowCharacter(characterId);
 
     /** @type {Character} */
@@ -3179,15 +3197,44 @@ async function deleteCharacterChatInternal(characterId, fileName) {
         return false;
     }
 
+    // Offer the associated media preview before the chat goes away; the
+    // chat file itself is still the source of truth for the scan.
+    let mediaPathsToDelete = null;
+    if (mediaPrompt) {
+        try {
+            const candidates = await fetchMediaDeletionCandidates({
+                scope: 'chat',
+                char_dir: String(character.avatar || '').replace(/\.png$/i, ''),
+                chat_name: String(fileName),
+            });
+            const items = (candidates.groups || []).flatMap(group => group.items || []);
+            if (items.length > 0) {
+                const decision = await promptMediaDeletion({
+                    groups: [{ kind: 'image', title: t`Images`, items }],
+                    confirmLabel: t`Delete chat and selected images`,
+                    skipLabel: t`Delete chat only`,
+                });
+                if (decision.action === 'cancel') {
+                    return false;
+                }
+                if (decision.action === 'delete') {
+                    mediaPathsToDelete = decision.paths;
+                }
+            }
+        } catch (error) {
+            console.warn('Media candidate lookup failed; continuing without the media prompt.', error);
+        }
+    }
+
     const rawChatSnapshot = await getRawCharacterChatSnapshot(characterId, fileName);
     const previousSelectedChat = String(character.chat || '');
-    const deletedCurrentChat = previousSelectedChat === fileName;
+    const deletedCurrentChat = previousSelectedChat.replace(/\.jsonl$/i, '') === String(fileName).replace(/\.jsonl$/i, '');
 
     const response = await fetch('/api/chats/delete', {
         method: 'POST',
         headers: getRequestHeaders(),
         body: JSON.stringify({
-            chatfile: `${fileName}.jsonl`,
+            chatfile: `${String(fileName).replace(/\.jsonl$/i, '')}.jsonl`,
             avatar_url: character.avatar,
         }),
     });
@@ -3197,8 +3244,18 @@ async function deleteCharacterChatInternal(characterId, fileName) {
         return false;
     }
 
+    if (mediaPathsToDelete && mediaPathsToDelete.length > 0) {
+        try {
+            notifyMediaDeleteResult(await deleteMediaFiles(mediaPathsToDelete));
+        } catch (error) {
+            console.warn('Failed to delete selected media files.', error);
+            toastr.error(t`Some files could not be deleted.`, t`Media cleanup`);
+        }
+    }
+
     if (deletedCurrentChat) {
         if (Number(characterId) === Number(this_chid)) {
+            beginChatTransition();
             chat_metadata = {};
             await replaceCurrentChat();
         } else {
@@ -3256,10 +3313,12 @@ async function delChat(chatfile) {
  * Deletes a character chat by its name.
  * @param {string} characterId Character ID to delete chat for
  * @param {string} fileName Name of the chat file to delete (without .jsonl extension)
+ * @param {object} [options={}] Options for the deletion.
+ * @param {boolean} [options.mediaPrompt=true] Whether to offer associated media for deletion.
  * @returns {Promise<void>} A promise that resolves when the chat is deleted.
  */
-export async function deleteCharacterChatByName(characterId, fileName) {
-    return await deleteCharacterChatInternal(String(characterId), fileName);
+export async function deleteCharacterChatByName(characterId, fileName, options = {}) {
+    return await deleteCharacterChatInternal(String(characterId), fileName, options);
 }
 
 export async function replaceCurrentChat() {
@@ -3768,8 +3827,8 @@ function isHiddenChatMessage(message) {
  * results can reach the model that has yet to produce the final reply.
  * @param {ChatMessage[]} rawChat Unfiltered chat snapshot
  * @param {ChatMessage[]} coreChat Post-filter chat snapshot
- * @returns {Map<number, {hidden: boolean, ownerCoreIndex: number}>} Per-summary (keyed by coreChat index)
- * whether the owner turn is hidden, and the owner's coreChat index (-1 when absent).
+ * @returns {Map<number, {hidden: boolean, ownerCoreIndex: number, inOpenTail: boolean}>} Per-summary (keyed by coreChat index)
+ * whether the owner turn is hidden, the owner's coreChat index (-1 when absent), and whether the summary sits in the open tool-task tail.
  */
 function resolveToolInvocationOwners(rawChat, coreChat) {
     const isInvocationSummary = (message) => message?.extra?.isSmallSys === true
@@ -3793,6 +3852,7 @@ function resolveToolInvocationOwners(rawChat, coreChat) {
         }
     }
 
+    const openTailStart = getOpenToolTaskTailStart(rawChat);
     const summaryOwners = new Map();
     for (const [coreIndex, rawIndex] of summaryCoreIndexes) {
         // Nearest preceding assistant turn, skipping other summaries.
@@ -3822,6 +3882,7 @@ function resolveToolInvocationOwners(rawChat, coreChat) {
         summaryOwners.set(coreIndex, {
             hidden: ownerRawIndex !== -1 && isHiddenChatMessage(rawChat[ownerRawIndex]),
             ownerCoreIndex: ownerRawIndex === -1 ? -1 : (coreIndexOfRawIndex.get(ownerRawIndex) ?? -1),
+            inOpenTail: rawIndex >= openTailStart,
         });
     }
     return summaryOwners;
@@ -6743,6 +6804,19 @@ class StreamingProcessor {
         await this.onProgressStreaming(messageId, text, true);
         const messageElement = chatElement.find(`.mes[mesid="${messageId}"]`);
         const message = chat[messageId];
+        // Stamp before swipe_info clones extra. A non-stop reason (`tool_calls`,
+        // `length`) keeps this turn from closing the tool task, so the next
+        // prompt build will not strip the in-progress tail's tool records.
+        // Infer `tool_calls` when the stream carried calls but the provider
+        // omitted a finish reason — missing would look like a legacy close.
+        if (message) {
+            const finishReason = this.finishReason
+                || (Array.isArray(this.toolCalls) && this.toolCalls.length > 0 ? 'tool_calls' : '');
+            if (finishReason) {
+                message.extra = message.extra || {};
+                message.extra.finish_reason = String(finishReason);
+            }
+        }
         addCopyToCodeBlocks(messageElement);
 
         await this.reasoningHandler.finish(messageId);
@@ -7820,8 +7894,9 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     // tool_calls would keep flowing to the provider on top of a hidden turn.
     // Resolve the owner of every invocation summary while the full raw chat is
     // still available (hidden messages are filtered out of coreChat above, so
-    // the merge step below cannot see them), and drop summaries whose owner is
-    // hidden. The message-emptiness check happens post-regex at the merge step.
+    // the merge step below cannot see them). Closed tasks drop those summaries.
+    // The open tail (no assistant `stop` yet) must keep them: stripping tool
+    // records mid-task makes the model call the same tools again.
     const invocationOwnerBySummary = canUseTools ? resolveToolInvocationOwners(chat, coreChat) : null;
 
     coreChat = await Promise.all(coreChat.map(async (/** @type {ChatMessage} */ chatItem, index) => {
@@ -7869,49 +7944,45 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
 
             if (isInvocationSummary) {
                 const owner = invocationOwnerBySummary?.get(chatItem.index);
-                // The summary's owner turn is hidden (dropped above) — drop the
-                // summary with it so hidden tool history cannot reach the provider.
-                if (owner?.hidden) {
-                    consumedSummaryIndexes.add(chatItem.index);
-                    continue;
-                }
+                const targetMessage = owner && owner.ownerCoreIndex >= 0
+                    ? coreChatByIndex.get(owner.ownerCoreIndex)
+                    : null;
                 // Non-streaming histories store the summary between the user
                 // turn and the final reply, so the owning assistant turn sits
                 // AFTER the summary, not before it. Merge by resolved owner
                 // index instead of guessing from the normalized tail.
-                if (owner && owner.ownerCoreIndex >= 0) {
-                    const targetMessage = coreChatByIndex.get(owner.ownerCoreIndex);
-                    // A regex script on the prompt lane may blank out the owner's
-                    // text. That is a hiding gesture the same way /hide is, so the
-                    // tool records owned by a blanked turn drop too — the summary
-                    // must NOT survive as a standalone entry, or its structured
-                    // invocations would still reach the provider. Reasoning
-                    // rounds legitimately produce an empty-text owner (the model
-                    // returned reasoning + tool_calls, no visible text) — those
-                    // must keep their invocations or the wire shape for reasoning
-                    // models breaks.
-                    if (targetMessage && isBlankMessageText(targetMessage.mes) && !hasMessageReasoning(targetMessage)) {
-                        consumedSummaryIndexes.add(chatItem.index);
-                        continue;
-                    }
-                    const shouldMergeIntoOwner =
-                        targetMessage
+                // A regex script on the prompt lane may blank out the owner's
+                // text. That is a hiding gesture the same way /hide is, so a
+                // closed task drops the tool records owned by a blanked turn.
+                // Reasoning rounds legitimately produce an empty-text owner —
+                // those are not blank for this check. The open tail never drops:
+                // the model still needs the calls. A hidden owner in that tail
+                // is not merged into, or the filtered turn would swallow them.
+                const action = classifyInvocationSummary({
+                    inOpenTail: owner?.inOpenTail === true,
+                    ownerHidden: owner?.hidden === true,
+                    ownerPresent: Boolean(targetMessage),
+                    ownerBlank: Boolean(targetMessage && isBlankMessageText(targetMessage.mes) && !hasMessageReasoning(targetMessage)),
+                    ownerMergeable: Boolean(targetMessage)
                         && !targetMessage.is_user
-                        && targetMessage?.extra?.type !== system_message_types.NARRATOR;
-
-                    if (shouldMergeIntoOwner) {
-                        coreChatByIndex.set(owner.ownerCoreIndex, {
-                            ...targetMessage,
-                            extra: {
-                                ...(targetMessage.extra || {}),
-                                tool_invocations: Array.isArray(targetMessage?.extra?.tool_invocations)
-                                    ? targetMessage.extra.tool_invocations.concat(invocations)
-                                    : invocations.slice(),
-                            },
-                        });
-                        consumedSummaryIndexes.add(chatItem.index);
-                        continue;
-                    }
+                        && targetMessage?.extra?.type !== system_message_types.NARRATOR,
+                });
+                if (action === 'drop') {
+                    consumedSummaryIndexes.add(chatItem.index);
+                    continue;
+                }
+                if (action === 'merge') {
+                    coreChatByIndex.set(owner.ownerCoreIndex, {
+                        ...targetMessage,
+                        extra: {
+                            ...(targetMessage.extra || {}),
+                            tool_invocations: Array.isArray(targetMessage?.extra?.tool_invocations)
+                                ? targetMessage.extra.tool_invocations.concat(invocations)
+                                : invocations.slice(),
+                        },
+                    });
+                    consumedSummaryIndexes.add(chatItem.index);
+                    continue;
                 }
             }
         }
@@ -9479,12 +9550,16 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
             // the merged final message, not one per intermediate round.
             const nonStreamFinishReason = data?.choices?.[0]?.finish_reason ?? null;
             const willAutoContinue = shouldAutoContinueOnTruncated(nonStreamFinishReason, isImpersonate);
+            // Same contract as the streaming stamp: a tool round with no
+            // provider reason must not look like a legacy close.
+            const stampedFinishReason = nonStreamFinishReason
+                || (canPerformToolCalls && ToolManager.hasToolCalls(data) ? 'tool_calls' : null);
 
             // Without streaming we'll be having a full message on continuation. Treat it as a last chunk.
             if (originalType !== 'continue') {
-                ({ type, getMessage } = await saveReply({ type, getMessage, title, swipes, reasoning, imageUrls, reasoningSignature, reasoningBlocks, reasoningDetails, suppressEmit: willAutoContinue }));
+                ({ type, getMessage } = await saveReply({ type, getMessage, title, swipes, reasoning, imageUrls, reasoningSignature, reasoningBlocks, reasoningDetails, suppressEmit: willAutoContinue, finishReason: stampedFinishReason }));
             } else {
-                ({ type, getMessage } = await saveReply({ type: 'appendFinal', getMessage, title, swipes, reasoning, imageUrls, reasoningSignature, reasoningBlocks, reasoningDetails, suppressEmit: willAutoContinue }));
+                ({ type, getMessage } = await saveReply({ type: 'appendFinal', getMessage, title, swipes, reasoning, imageUrls, reasoningSignature, reasoningBlocks, reasoningDetails, suppressEmit: willAutoContinue, finishReason: stampedFinishReason }));
             }
 
             // This relies on `saveReply` having been called to add the message to the chat, so it must be last.
@@ -10321,9 +10396,19 @@ export async function sendGenerationRequest(type, data, options = {}) {
     const lukerGenerationOptions = shouldTrackLukerGenerationState
         ? buildLukerGenerationRequestOptions(type, main_api)
         : null;
-    const requestData = lukerGenerationOptions
+    const requestTimeoutMs = main_api === 'textgenerationwebui' ? getRequestTimeoutMs() : 0;
+    let requestData = lukerGenerationOptions
         ? { ...data, luker_generation: lukerGenerationOptions }
         : data;
+    if (requestTimeoutMs > 0) {
+        requestData = {
+            ...requestData,
+            luker_generation: {
+                ...(requestData.luker_generation || {}),
+                request_timeout_ms: requestTimeoutMs,
+            },
+        };
+    }
 
     // Non-streaming fallback for text-completion backends (textgenerationwebui /
     // kobold / novel). Openai / koboldhorde branch off above through their own
@@ -11047,7 +11132,7 @@ function applyPostGenerationText(text, isImpersonate, isContinue) {
     return out;
 }
 
-export async function saveReply({ type, getMessage, fromStreaming = false, title = '', swipes = [], reasoning = '', imageUrls = [], reasoningSignature = null, reasoningBlocks = null, reasoningDetails = null, suppressEmit = false }) {
+export async function saveReply({ type, getMessage, fromStreaming = false, title = '', swipes = [], reasoning = '', imageUrls = [], reasoningSignature = null, reasoningBlocks = null, reasoningDetails = null, suppressEmit = false, finishReason = null }) {
     // Backward compatibility
     if (arguments.length > 1 && typeof arguments[0] !== 'object') {
         console.trace('saveReply called with positional arguments. Please use an object instead.');
@@ -11239,6 +11324,10 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
     }
 
     const item = chat[chat.length - 1];
+    if (finishReason && item && !item.is_user) {
+        item.extra = item.extra || {};
+        item.extra.finish_reason = String(finishReason);
+    }
     if (item.swipe_info === undefined) {
         item.swipe_info = [];
     }
@@ -11570,6 +11659,7 @@ export function resetChatState() {
     // sets up system user to tell user about having deleted a character
     chat.splice(0, chat.length, ...SAFETY_CHAT);
     // resets chat metadata
+    beginChatTransition();
     chat_metadata = {};
     // resets the characters array, forcing getcharacters to reset
     characters.length = 0;
@@ -13986,6 +14076,10 @@ async function appendChatMessagesInternal(messages, retryCount = 0) {
     // boolean; return false so the caller's saveChatConditional fallback also
     // trips the guard in saveChatInternal instead of full-saving an empty body.
     if (!chat_metadata?.integrity) {
+        if (isChatTransitionInProgress()) {
+            console.debug('[ChatWrite] Append dropped: chat transition in progress.');
+            return false;
+        }
         console.error('[ChatWrite] Append refused: chat not fully loaded (integrity missing).');
         toastr.error(
             t`Refusing to save: chat is not fully loaded. Reload the page to prevent data loss.`,
@@ -14169,6 +14263,10 @@ async function patchChatMessagesInternal(operations, retryCount = 0) {
     // saveChatInternal for full rationale). Same false-return semantics as
     // appendChatMessagesInternal.
     if (!chat_metadata?.integrity) {
+        if (isChatTransitionInProgress()) {
+            console.debug('[ChatWrite] Patch dropped: chat transition in progress.');
+            return false;
+        }
         console.error('[ChatWrite] Patch refused: chat not fully loaded (integrity missing).');
         toastr.error(
             t`Refusing to save: chat is not fully loaded. Reload the page to prevent data loss.`,
@@ -14410,6 +14508,10 @@ async function saveChatMetadataInternal(withMetadata = undefined, retryCount = 0
     // Data-loss guard: refuse to save when chat is not fully loaded (see
     // saveChatInternal for full rationale).
     if (!chat_metadata?.integrity) {
+        if (isChatTransitionInProgress()) {
+            console.debug('[ChatWrite] Metadata save dropped: chat transition in progress.');
+            return false;
+        }
         console.error('[ChatWrite] Metadata save refused: chat not fully loaded (integrity missing).');
         toastr.error(
             t`Refusing to save: chat is not fully loaded. Reload the page to prevent data loss.`,
@@ -14553,6 +14655,10 @@ async function saveChatInternal({ chatName, withMetadata, mesId, force = false, 
     // /api/chats/save, whose null-integrity path (chats.js:2166) skips the
     // integrity check and overwrites server data.
     if (!chat_metadata?.integrity) {
+        if (isChatTransitionInProgress()) {
+            console.debug('[ChatWrite] Save dropped: chat transition in progress.');
+            return;
+        }
         console.error('[ChatWrite] Save refused: chat not fully loaded (integrity missing).');
         toastr.error(
             t`Refusing to save: chat is not fully loaded. Reload the page to prevent data loss.`,
@@ -14920,6 +15026,26 @@ export async function unshallowCharacter(characterId) {
     await getOneCharacter(avatar, { preserveChat: true });
 }
 
+let chatTransitionInProgress = false;
+
+/**
+ * Marks a deliberate chat transition (delete / switch / new / close) whose
+ * chat_metadata window has no integrity until getChat completes. The write
+ * guards drop late writes silently while this is set instead of reporting
+ * them as load failures. Cleared by getChat.
+ */
+function beginChatTransition() {
+    chatTransitionInProgress = true;
+}
+
+function endChatTransition() {
+    chatTransitionInProgress = false;
+}
+
+export function isChatTransitionInProgress() {
+    return chatTransitionInProgress;
+}
+
 export async function getChat() {
     try {
         await unshallowCharacter(this_chid);
@@ -14943,6 +15069,7 @@ export async function getChat() {
 
         // Corrupted chat file — do NOT overwrite server data
         if (data?.corrupted) {
+            endChatTransition();
             toastr.error(t`Chat data is corrupted. Reload the page to retry.`, t`Chat load failed`);
             return;
         }
@@ -14965,6 +15092,7 @@ export async function getChat() {
         if (!chat_metadata.integrity) {
             chat_metadata.integrity = uuidv4();
         }
+        endChatTransition();
         rememberChatMetadataSnapshot();
         rememberChatMessageSnapshot();
         await getChatResult();
@@ -14978,6 +15106,7 @@ export async function getChat() {
             $('#send_textarea').trigger('click').trigger('focus');
         });
     } catch (error) {
+        endChatTransition();
         toastr.error(t`Chat could not be loaded. Reload the page to retry.`, t`Chat load failed`);
         console.log(error);
     }
@@ -15110,6 +15239,7 @@ export async function openCharacterChat(file_name) {
         return;
     }
     characters[chidSnapshot].chat = file_name;
+    beginChatTransition();
     chat_metadata = {};
     chatServerState.nextOlderIndex = 0;
     chatServerState.totalMessages = 0;
@@ -16467,6 +16597,7 @@ async function createNewCharacterChatForContext(context) {
 
     if (isCurrentChatFileActionContextActive(context)) {
         await clearChat({ clearData: true });
+        beginChatTransition();
         chat_metadata = {};
         character.chat = newChatName;
         $('#selected_chat_pole').val(character.chat);
@@ -16556,16 +16687,25 @@ async function displayChats(searchQuery, currentChat, displayName, avatarImg, se
 
         filteredData.sort((a, b) => sortMoments(timestampToMoment(a.last_mes), timestampToMoment(b.last_mes)));
 
+        // The search endpoint returns `file_name` with the `.jsonl`
+        // extension (same shape as the other chat list endpoints), while the
+        // open chat pointer (`characters[].chat` / `group.chat_id`) is an
+        // extensionless id. Normalize at the render boundary so highlight,
+        // open and delete rows all speak the id form.
+        const trimExtension = (fileName) => String(fileName ?? '').replace(/\.jsonl$/i, '');
+        const normalizedCurrentChat = trimExtension(currentChat);
+
         for (const chat of filteredData) {
-            const isSelected = currentChat === chat.file_name;
+            const chatId = trimExtension(chat.file_name);
+            const isSelected = normalizedCurrentChat === chatId;
             const template = $('#past_chat_template .select_chat_block_wrapper').clone();
-            template.find('.select_chat_block').attr('file_name', chat.file_name);
+            template.find('.select_chat_block').attr('file_name', chatId);
             template.find('.avatar img').attr('src', avatarImg);
             template.find('.select_chat_block_filename').text(chat.file_name);
             template.find('.chat_file_size').text(`(${chat.file_size},`);
             template.find('.chat_messages_num').text(`${chat.message_count} 💬)`);
             template.find('.select_chat_block_mes').text(chat.preview_message);
-            template.find('.PastChat_cross').attr('file_name', chat.file_name);
+            template.find('.PastChat_cross').attr('file_name', chatId);
             template.find('.chat_messages_date').text(timestampToMoment(chat.last_mes).format('lll'));
 
             if (isSelected) {
@@ -16574,7 +16714,7 @@ async function displayChats(searchQuery, currentChat, displayName, avatarImg, se
 
             $('#select_chat_div').append(template);
 
-            if (Array.isArray(highlightNames) && highlightNames.includes(chat.file_name)) {
+            if (Array.isArray(highlightNames) && highlightNames.some(name => trimExtension(name) === chatId)) {
                 const templateOffset = template.offset().top - template.parent().offset().top;
                 $('#select_chat_div').scrollTop(templateOffset);
                 flashHighlight(template, debounce_timeout.extended);
@@ -18754,9 +18894,11 @@ export async function swipe_right(event = null, { source, repeated, message } = 
  * Imports supported files dropped into the app window.
  * @param {File[]} files Array of files to process
  * @param {Map<File, string>} [data] Extra data to pass to the import function
+ * @param {object} [options] Additional import options
+ * @param {string} [options.preserveChat] Chat pointer of the card being replaced, kept on the stored card
  * @returns {Promise<void>}
  */
-export async function processDroppedFiles(files, data = new Map()) {
+export async function processDroppedFiles(files, data = new Map(), { preserveChat = '' } = {}) {
     const allowedMimeTypes = [
         'application/json',
         'image/png',
@@ -18776,7 +18918,7 @@ export async function processDroppedFiles(files, data = new Map()) {
         const extension = file.name.split('.').pop().toLowerCase();
         if (allowedMimeTypes.some(x => file.type.startsWith(x)) || allowedExtensions.includes(extension)) {
             const preservedName = data instanceof Map && data.get(file);
-            const avatarFileName = await importCharacter(file, { preserveFileName: preservedName });
+            const avatarFileName = await importCharacter(file, { preserveFileName: preservedName, preserveChat });
             if (avatarFileName !== undefined) {
                 avatarFileNames.push(avatarFileName);
             }
@@ -18825,11 +18967,12 @@ function selectImportedChar(charId) {
  * @param {File} file File to import
  * @param {object} [options] - Options
  * @param {string} [options.preserveFileName] Whether to preserve original file name
+ * @param {string} [options.preserveChat] Chat pointer to keep on the stored card when replacing
  * @param {Boolean} [options.importTags=false] Whether to import tags
  * @param {Boolean} [options.suppressToast=false] Whether to suppress success toasts
  * @returns {Promise<string>}
  */
-async function importCharacter(file, { preserveFileName = '', importTags = false, suppressToast = false } = {}) {
+async function importCharacter(file, { preserveFileName = '', importTags = false, suppressToast = false, preserveChat = '' } = {}) {
     if (is_group_generating || is_send_press) {
         toastr.error(t`Cannot import characters while generating. Stop the request and try again.`, t`Import aborted`);
         throw new Error('Cannot import character while generating');
@@ -18849,6 +18992,7 @@ async function importCharacter(file, { preserveFileName = '', importTags = false
     formData.append('file_type', format);
     formData.append('user_name', name1);
     if (preserveFileName) formData.append('preserved_name', preserveFileName);
+    if (preserveFileName && preserveChat) formData.append('preserved_chat', String(preserveChat));
 
     try {
         const result = await fetch('/api/characters/import', {
@@ -18992,8 +19136,8 @@ export async function renameGroupOrCharacterChat({ characterId, groupId, oldFile
     const body = {
         is_group: !!groupId,
         avatar_url: characters[characterId]?.avatar,
-        original_file: `${oldFileName}.jsonl`,
-        renamed_file: `${newFileName.trim()}.jsonl`,
+        original_file: `${String(oldFileName).replace(/\.jsonl$/i, '')}.jsonl`,
+        renamed_file: `${String(newFileName).trim().replace(/\.jsonl$/i, '')}.jsonl`,
     };
 
     if (body.original_file === body.renamed_file) {
@@ -19035,7 +19179,8 @@ export async function renameGroupOrCharacterChat({ characterId, groupId, oldFile
 
         if (groupId) {
             await renameGroupChat(groupId, oldFileName, newFileName);
-        } else if (characterId !== undefined && String(characterId) === String(this_chid) && characters[characterId]?.chat === oldFileName) {
+        } else if (characterId !== undefined && String(characterId) === String(this_chid)
+            && String(characters[characterId]?.chat || '').replace(/\.jsonl$/i, '') === String(oldFileName).replace(/\.jsonl$/i, '')) {
             characters[characterId].chat = newFileName;
             $('#selected_chat_pole').val(characters[characterId].chat);
             await updateRemoteChatName(characterId, newFileName);
@@ -19087,6 +19232,7 @@ export async function closeCurrentChat() {
         setActiveCharacter(null);
         setActiveGroup(null);
         this_edit_mes_id = undefined;
+        beginChatTransition();
         chat_metadata = {};
         selected_button = 'characters';
         $('#rm_button_selected_ch').children('h2').text('');
@@ -19158,9 +19304,10 @@ export async function handleDeleteCharacter(this_chid, delete_chats) {
  * @param {string|string[]} characterKey - The key (avatar) of the character to be deleted
  * @param {Object} [options] - Optional parameters for the deletion
  * @param {boolean} [options.deleteChats=true] - Whether to delete associated chats or not
+ * @param {boolean} [options.mediaPrompt=true] - Whether to offer associated media for deletion
  * @return {Promise<boolean>} - A promise that resolves when the character is successfully deleted
  */
-export async function deleteCharacter(characterKey, { deleteChats = true } = {}) {
+export async function deleteCharacter(characterKey, { deleteChats = true, mediaPrompt = true } = {}) {
     if (!Array.isArray(characterKey)) {
         characterKey = [characterKey];
     }
@@ -19176,6 +19323,52 @@ export async function deleteCharacter(characterKey, { deleteChats = true } = {})
         );
         if (!confirmClose) {
             return false;
+        }
+    }
+
+    // Aggregate associated media for every target card and ask once, before
+    // the first card is touched. Cancel aborts the whole deletion.
+    let mediaPathsToDelete = [];
+    const mediaByAvatar = new Map();
+    let mediaResolved = false;
+    if (mediaPrompt) {
+        try {
+            const groups = [];
+            let notes = [];
+            for (const key of uniqueCharacterKeys) {
+                const candidates = await fetchMediaDeletionCandidates({ scope: 'character', avatar: String(key) });
+                mediaResolved = true;
+                const candidatePaths = new Set();
+                for (const group of candidates.groups || []) {
+                    groups.push(group);
+                    for (const item of group.items || []) {
+                        candidatePaths.add(item.path);
+                    }
+                }
+                mediaByAvatar.set(String(key), candidatePaths);
+                notes = [...new Set([...notes, ...(candidates.notes || [])])];
+            }
+            const items = groups.flatMap(group => group.items || []);
+            if (items.length > 0) {
+                const decision = await promptMediaDeletion({
+                    groups: groups.map(group => ({ ...group, title: group.kind === 'sprite' ? t`Sprites` : t`Images` })),
+                    notes: notes
+                        .map(note => note === 'same_name_shared_folder_skipped'
+                            ? t`Another character shares this name — shared folders were skipped.`
+                            : null)
+                        .filter(Boolean),
+                    confirmLabel: t`Delete character and selected images`,
+                    skipLabel: t`Delete character only`,
+                });
+                if (decision.action === 'cancel') {
+                    return false;
+                }
+                if (decision.action === 'delete') {
+                    mediaPathsToDelete = decision.paths;
+                }
+            }
+        } catch (error) {
+            console.warn('Media candidate lookup failed; continuing without the media prompt.', error);
         }
     }
 
@@ -19220,6 +19413,7 @@ export async function deleteCharacter(characterKey, { deleteChats = true } = {})
 
         const pendingCharacterUndoByAvatar = new Map(pendingCharacterUndos.map(snapshot => [snapshot.avatarUrl, snapshot]));
 
+        const deletedAvatars = new Set();
         for (const key of uniqueCharacterKeys) {
             const character = characters.find(x => x.avatar == key);
             if (!character) {
@@ -19254,7 +19448,7 @@ export async function deleteCharacter(characterKey, { deleteChats = true } = {})
                 promptedLorebooks.add(importedLorebookResult.lorebookName);
             }
 
-            const msg = { avatar_url: character.avatar, delete_chats: deleteChats };
+            const msg = { avatar_url: character.avatar, delete_chats: deleteChats, skip_asset_cascade: mediaPrompt && mediaResolved };
 
             const response = await fetch('/api/characters/delete', {
                 method: 'POST',
@@ -19268,6 +19462,7 @@ export async function deleteCharacter(characterKey, { deleteChats = true } = {})
                 continue;
             }
 
+            deletedAvatars.add(String(key));
             accountStorage.removeItem(`AlertWI_${character.avatar}`);
             accountStorage.removeItem(`AlertRegex_${character.avatar}`);
             accountStorage.removeItem(`mediaWarningShown:${character.avatar}`);
@@ -19304,6 +19499,27 @@ export async function deleteCharacter(characterKey, { deleteChats = true } = {})
         }
 
         await removeCharacterFromUI();
+
+        if (mediaPathsToDelete.length > 0) {
+            // Only unlink media that belongs to cards whose deletion actually
+            // succeeded; failed cards keep their files. The Set also dedupes
+            // paths reported by more than one card.
+            const deletableMediaPaths = new Set();
+            for (const avatar of deletedAvatars) {
+                for (const candidatePath of mediaByAvatar.get(avatar) || []) {
+                    deletableMediaPaths.add(candidatePath);
+                }
+            }
+            const pathsToDelete = [...new Set(mediaPathsToDelete.filter(path => deletableMediaPaths.has(path)))];
+            if (pathsToDelete.length > 0) {
+                try {
+                    notifyMediaDeleteResult(await deleteMediaFiles(pathsToDelete));
+                } catch (error) {
+                    console.warn('Failed to delete selected media files.', error);
+                    toastr.error(t`Some files could not be deleted.`, t`Media cleanup`);
+                }
+            }
+        }
 
         if (pendingCharacterUndos.length > 0) {
             const deletedCharacterCount = pendingCharacterUndos.length;
@@ -19365,6 +19581,7 @@ export async function newAssistantChat({ temporary = false } = {}) {
         return openPermanentAssistantChat();
     }
     chat.splice(0, chat.length);
+    beginChatTransition();
     chat_metadata = {};
     setCharacterName(neutralCharacterName);
     sendSystemMessage(system_message_types.ASSISTANT_NOTE);
@@ -21810,19 +22027,26 @@ jQuery(async function () {
                             : this_chid;
                         let replacedCharacter = null;
                         if (previousAvatar) {
-                            const response = await fetch('/api/characters/get', {
-                                method: 'POST',
-                                headers: getRequestHeaders(),
-                                body: JSON.stringify({ avatar_url: previousAvatar }),
-                                cache: 'no-cache',
-                            });
-                            if (response.ok) {
-                                replacedCharacter = await response.json();
+                            try {
+                                const response = await fetch('/api/characters/get', {
+                                    method: 'POST',
+                                    headers: getRequestHeaders(),
+                                    body: JSON.stringify({ avatar_url: previousAvatar }),
+                                    cache: 'no-cache',
+                                });
+                                if (response.ok) {
+                                    replacedCharacter = await response.json();
+                                }
+                            } catch (error) {
+                                // A dropped connection or unreadable body must not
+                                // skip the post-replace event: the !replacedCharacter
+                                // fallback below emits with the in-memory character.
+                                console.warn(`Failed to refresh character ${previousAvatar} for the replaced event; falling back to current data`, error);
                             }
                         }
                         if (!replacedCharacter) {
                             if (previousAvatar) {
-                                await getOneCharacter(previousAvatar);
+                                await getOneCharacter(previousAvatar, { preserveChat: true });
                             }
                             replacedCharacter = replacedIndex >= 0
                                 ? characters[replacedIndex]
@@ -21831,10 +22055,22 @@ jQuery(async function () {
                         if (!replacedCharacter) {
                             return;
                         }
+                        const replacedIndexFinal = replacedIndex >= 0 ? replacedIndex : this_chid;
+                        await handlePostReplaceBindings({
+                            characterId: replacedIndexFinal,
+                            previousCharacter,
+                            newCharacter: characters[replacedIndexFinal] || replacedCharacter,
+                        });
+                        await handlePostReplaceWorldBook({
+                            characterId: replacedIndexFinal,
+                            previousCharacter,
+                            newCharacter: characters[replacedIndexFinal] || replacedCharacter,
+                            previousLorebookSnapshot,
+                        });
                         await eventSource.emit(event_types.CHARACTER_REPLACED, {
                             detail: {
-                                id: replacedIndex >= 0 ? replacedIndex : this_chid,
-                                character: replacedCharacter,
+                                id: replacedIndexFinal,
+                                character: characters[replacedIndexFinal] || replacedCharacter,
                                 previousCharacter,
                                 previousLorebookSnapshot,
                                 source: 'replace_update',
@@ -21849,7 +22085,7 @@ jQuery(async function () {
                 const result = await Popup.show.confirm(t`Replace Character`,
                     `<p>${t`Choose a new character card to replace this character with.`}</p>` +
                     `<p>${t`You can also replace this character with the one from the online source.`}${onlineUrl ? `<br />This character was downloaded from: <var>${onlineUrl}</var>` : ''}</p>` +
-                    `<p>${t`All chats, assets and group memberships will be preserved, but local changes to the character data will be lost.`}<br />${t`Proceed?`}</p>`,
+                    `<p>${t`All chats, assets and group memberships will be preserved. Local bindings on this card (presets, personas, orchestration, memory graph, CardApp) are kept. If the new card brings conflicting bindings, you will be asked.`}<br />${t`Proceed?`}</p>`,
                     {
                         okButton: false,
                         customButtons: [{
@@ -21874,6 +22110,9 @@ jQuery(async function () {
                     case POPUP_RESULT_FILE: {
                         async function uploadReplacementCard(e) {
                             const file = e.target.files[0];
+                            // Clear the input up front: a kept value makes re-selecting
+                            // the same card fire no change event, so the retry dies silently.
+                            e.target.value = '';
                             if (!file) {
                                 return;
                             }
@@ -21881,10 +22120,11 @@ jQuery(async function () {
                             try {
                                 const data = new Map();
                                 data.set(file, characters[this_chid].avatar);
-                                await processDroppedFiles([file], data);
+                                await processDroppedFiles([file], data, { preserveChat: currentChatFile });
                                 await postReplace();
                                 await emitCharacterReplacedEvent();
-                            } catch {
+                            } catch (error) {
+                                console.error('Failed to replace the character card', error);
                                 toastr.error('Failed to replace the character card.', 'Something went wrong');
                             }
                         }
@@ -21900,7 +22140,7 @@ jQuery(async function () {
                             break;
                         }
                         onlineUrl = inputUrl;
-                        await importFromExternalUrl(onlineUrl, { preserveFileName: characters[this_chid].avatar });
+                        await importFromExternalUrl(onlineUrl, { preserveFileName: characters[this_chid].avatar, preserveChat: currentChatFile });
                         await postReplace();
                         await emitCharacterReplacedEvent();
                         break;

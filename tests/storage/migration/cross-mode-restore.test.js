@@ -154,7 +154,7 @@ describe('crossModeRestore — happy path sqlite→fs', () => {
 
         // Progress events include the convert stages.
         const convertStages = events
-            .filter(e => e.phase === 'convert') // banned-words-allow
+            .filter(e => e.phase === 'convert')
             .map(e => e.stage);
         for (const expected of ['settings-copied', 'worlds-copied', 'chats-copied', 'done']) {
             expect(convertStages).toContain(expected);
@@ -446,6 +446,31 @@ describe('extractFsTreeCategories', () => {
         // Engine sentinels never appear on disk.
         expect(fs.existsSync(path.join(liveRoot, ENGINE_META_ENTRY))).toBe(false);
         expect(fs.existsSync(path.join(liveRoot, ENGINE_DUMP_ENTRY))).toBe(false);
+    });
+
+    test('overwrites a pre-existing read-only file', async () => {
+        const zipPath = path.join(dataRoot, 'tree.zip');
+        await new Promise((resolve, reject) => {
+            const out = fs.createWriteStream(zipPath);
+            const arc = archiver('zip');
+            arc.on('error', reject);
+            out.on('close', resolve);
+            arc.pipe(out);
+            arc.append('{}', { name: 'manifest.json' });
+            arc.append('NEW', { name: 'extensions/repo/.git/objects/aa/bb' });
+            arc.finalize();
+        });
+
+        const liveRoot = path.join(dataRoot, 'live');
+        const dirs = buildDirs(liveRoot);
+        const gitObject = path.join(dirs.extensions, 'repo', '.git', 'objects', 'aa', 'bb');
+        fs.mkdirSync(path.dirname(gitObject), { recursive: true });
+        fs.writeFileSync(gitObject, 'OLD');
+        fs.chmodSync(gitObject, 0o444);
+
+        const result = await extractFsTreeCategories(zipPath, dirs, { extensions: true }, {});
+        expect(result.restoredCount).toBe(1);
+        expect(fs.readFileSync(gitObject, 'utf8')).toBe('NEW');
     });
 
     test('refuses path-traversal entries', () => {
